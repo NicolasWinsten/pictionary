@@ -1,0 +1,576 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pictionary</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.2.0/bundles/stomp.umd.min.js"></script>
+    <style>
+      :root {
+        --ink: #1c2430;
+        --mint: #baf3d1;
+        --sky: #d7ecff;
+        --accent: #e4572e;
+      }
+      body {
+        margin: 0;
+        font-family: "Fira Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: radial-gradient(circle at 20% 20%, var(--mint), transparent 45%),
+          radial-gradient(circle at 80% 0%, var(--sky), transparent 45%),
+          #f6f7fb;
+      }
+      .wrap {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 48px 20px;
+      }
+      h1 {
+        font-size: 48px;
+        letter-spacing: -0.02em;
+        margin-bottom: 12px;
+      }
+      .card {
+        background: #fff;
+        border-radius: 20px;
+        padding: 24px;
+        box-shadow: 0 12px 30px rgba(28, 36, 48, 0.12);
+      }
+      .row {
+        display: flex;
+        gap: 16px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        padding: 10px 16px;
+        border-radius: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .pill {
+        padding: 6px 12px;
+        border-radius: 999px;
+        background: var(--mint);
+        font-weight: 600;
+      }
+      .note {
+        opacity: 0.8;
+      }
+      .canvas-wrap {
+        margin-top: 20px;
+        display: inline-grid;
+        gap: 12px;
+      }
+      .game-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 20px;
+        flex-wrap: wrap;
+      }
+      .player-panel {
+        min-width: 200px;
+        background: #fff;
+        border-radius: 16px;
+        padding: 16px;
+        box-shadow: 0 8px 24px rgba(28, 36, 48, 0.1);
+      }
+      .player-columns {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
+      }
+      .player-column {
+        min-width: 160px;
+      }
+      .player-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: grid;
+        gap: 8px;
+      }
+      .player-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 10px;
+        border-radius: 10px;
+        background: #f6f7fb;
+        font-weight: 600;
+      }
+      .canvas-box {
+        border: 1px solid #d8e0ea;
+        border-radius: 12px;
+        background: #f8fbff;
+        padding: 8px;
+      }
+      canvas {
+        display: block;
+        border-radius: 8px;
+        background: #f8fbff;
+        touch-action: none;
+      }
+      .canvas-tools {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      .guess-bar {
+        flex: 1;
+        display: flex;
+        gap: 10px;
+      }
+      .guess-input {
+        width: 100%;
+        border: 1px solid #d8e0ea;
+        border-radius: 12px;
+        padding: 10px 12px;
+        font-size: 15px;
+        background: #fff;
+      }
+      .chat-box {
+        margin-top: 12px;
+        border: 1px solid #d8e0ea;
+        border-radius: 12px;
+        padding: 10px;
+        background: #f8fbff;
+        max-height: 180px;
+        overflow-y: auto;
+        display: grid;
+        gap: 6px;
+      }
+      .chat-line {
+        font-size: 14px;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgba(246, 247, 251, 0.92);
+        backdrop-filter: blur(6px);
+        z-index: 10;
+      }
+      .lobby-card {
+        width: min(520px, 90vw);
+        background: #fff;
+        border-radius: 18px;
+        padding: 24px;
+        box-shadow: 0 18px 40px rgba(28, 36, 48, 0.18);
+        display: grid;
+        gap: 12px;
+        text-align: center;
+      }
+      .lobby-input {
+        width: 100%;
+        border: 1px solid #d8e0ea;
+        border-radius: 12px;
+        padding: 12px 14px;
+        font-size: 16px;
+      }
+      .lobby-actions {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="overlay" x-data="lobbyPanel()" x-show="!$store.ws.isConnected" x-transition>
+      <div class="lobby-card">
+        <h2>Create a lobby</h2>
+        <p class="note">Enter your lobby code to start.</p>
+        <input
+          class="lobby-input"
+          type="text"
+          placeholder="Lobby code"
+          x-model.trim="$store.ws.lobbyCode"
+          @keydown.enter.prevent="connectLobby()"
+        />
+        <div class="lobby-actions">
+          <button @click="connectLobby()">Connect</button>
+          <span class="pill" x-text="$store.ws.wsStatus"></span>
+        </div>
+      </div>
+    </div>
+    <div class="wrap">
+      <h1>Pictionary</h1>
+      <p class="note">Spring Boot + WebSockets + Alpine.js</p>
+
+      <div class="card">
+        <div class="game-row">
+          <div
+            class="canvas-wrap"
+            x-data="canvasPanel()"
+            x-init="init()"
+            @draw-event.window="applyRemoteDraw($event.detail)"
+          >
+            <div class="canvas-box">
+              <canvas
+                x-ref="draw"
+                @pointerdown.prevent="pointerDown($event)"
+                @pointermove.prevent="pointerMove($event)"
+                @pointerup="pointerUp()"
+                @pointerleave="pointerUp()"
+              ></canvas>
+            </div>
+            <div class="canvas-tools">
+              <button @click="clearCanvas(ctx, width, height)">Clear</button>
+              <div class="guess-bar">
+                <input
+                  class="guess-input"
+                  type="text"
+                  placeholder="Type a guess and press Enter"
+                  x-model.trim="guessText"
+                  @keydown.enter.prevent="submitGuess()"
+                />
+              </div>
+            </div>
+          </div>
+          <aside
+            class="player-panel"
+            x-data="playerPanel()"
+            @player-joined.window="handlePlayerJoined($event.detail)"
+            @chat-message.window="handleChatMessage($event.detail)"
+          >
+            <div class="player-columns">
+              <div class="player-column">
+                <div class="pill">Players</div>
+                <ul class="player-list">
+                  <template x-for="(player, index) in list" :key="`${player.clientId}-${index}`">
+                    <li class="player-item">
+                      <span x-text="player.name"></span>
+                      <span class="note" x-show="isSelf(player)">(you)</span>
+                    </li>
+                  </template>
+                </ul>
+              </div>
+              <div class="player-column">
+                <div class="pill">Guesses</div>
+                <div class="chat-box">
+                  <template x-for="(entry, index) in chatMessages" :key="`${entry.id}-${index}`">
+                    <div class="chat-line">
+                      <strong x-text="entry.name"></strong>
+                      <span x-text="`: ${entry.text}`"></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  <script>
+    document.addEventListener("alpine:init", () => {
+      Alpine.store("ws", createWsStore());
+    });
+
+    function createWsStore() {
+      return {
+        isConnected: false,
+        lobbyCode: "",
+        stompClient: null,
+        pendingMessages: [],
+        clientId: null,
+        wsStatus: "disconnected",
+        subscribedLobby: null,
+        lobbySubscription: null,
+        playerSubscription: null,
+        ensureClientId() {
+          const storedId = getStoredClientId();
+          // if (storedId) {
+          //   this.clientId = storedId;
+          //   return;
+          // }
+          this.clientId = createClientId();
+          saveClientId(this.clientId);
+        },
+        connectLobby() {
+          const code = this.lobbyCode.trim();
+          if (!code) {
+            this.wsStatus = "code required";
+            return;
+          }
+          this.ensureClientId();
+          if (this.stompClient && this.stompClient.connected) {
+            this.sendStomp("/app/lobby", { code, clientId: this.clientId });
+            return;
+          }
+          const stomp = StompJs;
+          if (!stomp || !SockJS) {
+            this.wsStatus = "stomp unavailable";
+            return;
+          }
+          this.wsStatus = "connecting";
+          this.stompClient = new stomp.Client({
+            webSocketFactory: () => new SockJS("/ws"),
+            reconnectDelay: 3000,
+            onConnect: () => {
+              this.isConnected = true;
+              this.wsStatus = "connected";
+              this.subscribeLobby(code);
+              this.flushPending();
+              this.sendStomp("/app/lobby", { code, clientId: this.clientId });
+            },
+            onStompError: () => {
+              this.isConnected = false;
+              this.wsStatus = "error";
+            },
+            onWebSocketClose: () => {
+              this.isConnected = false;
+              this.wsStatus = "disconnected";
+            }
+          });
+          this.stompClient.activate();
+        },
+        subscribeLobby(code) {
+          if (!code) {
+            return;
+          }
+          if (this.subscribedLobby === code && this.lobbySubscription) {
+            return;
+          }
+          if (this.lobbySubscription) {
+            this.lobbySubscription.unsubscribe();
+          }
+          if (this.playerSubscription) {
+            this.playerSubscription.unsubscribe();
+          }
+          this.subscribedLobby = code;
+          if (!this.stompClient || !this.stompClient.connected) {
+            return;
+          }
+          this.lobbySubscription = this.stompClient.subscribe(
+            `/topic/lobby/${code}/draw`,
+            (message) => {
+              let payload = null;
+              try {
+                payload = JSON.parse(message.body);
+              } catch (error) {
+                return;
+              }
+              if (!payload || payload.sourceId === this.clientId) {
+                return;
+              }
+              this.dispatchDrawEvent(payload);
+            }
+          );
+          this.playerSubscription = this.stompClient.subscribe(
+            `/topic/lobby/${code}/players`,
+            (message) => {
+              let payload = null;
+              try {
+                payload = JSON.parse(message.body);
+              } catch (error) {
+                return;
+              }
+              if (!payload || !payload.clientId || !payload.name) {
+                return;
+              }
+              this.dispatchPlayerJoined(payload);
+            }
+          );
+        },
+        flushPending() {
+          if (!this.stompClient || !this.stompClient.connected) {
+            return;
+          }
+          while (this.pendingMessages.length) {
+            const next = this.pendingMessages.shift();
+            this.stompClient.publish({
+              destination: next.destination,
+              body: next.body,
+              headers: { "content-type": "application/json" }
+            });
+          }
+        },
+        sendStomp(destination, body) {
+          const payload = JSON.stringify(body);
+          if (!this.stompClient || !this.stompClient.connected) {
+            this.pendingMessages.push({ destination, body: payload });
+            return;
+          }
+          this.stompClient.publish({
+            destination,
+            body: payload,
+            headers: { "content-type": "application/json" }
+          });
+        },
+        sendDrawEvent(type, x, y) {
+          this.sendStomp("/app/draw", { type, x, y, sourceId: this.clientId });
+        },
+        dispatchDrawEvent(payload) {
+          window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
+        },
+        dispatchPlayerJoined(payload) {
+          window.dispatchEvent(new CustomEvent("player-joined", { detail: payload }));
+        }
+      };
+    }
+
+    function lobbyPanel() {
+      return {
+        connectLobby() {
+          this.$store.ws.connectLobby();
+        }
+      };
+    }
+
+    function canvasPanel() {
+      return {
+        ctx: null,
+        width: 400,
+        height: 400,
+        lastPos: null,
+        isDrawing: false,
+        remotePaths: {},
+        guessText: "",
+        init() {
+          this.$store.ws.ensureClientId();
+          initCanvas(this, this.$refs);
+        },
+        pointerDown(event) {
+          if (!this.ctx) return;
+          this.isDrawing = true;
+          const { x, y } = getPos(this.$refs, event);
+          this.lastPos = { x, y };
+          this.ctx.beginPath();
+          this.ctx.moveTo(x, y);
+          this.$store.ws.sendDrawEvent("start", x, y);
+        },
+        pointerMove(event) {
+          if (!this.isDrawing || !this.ctx) return;
+          const { x, y } = getPos(this.$refs, event);
+          this.ctx.lineTo(x, y);
+          this.ctx.stroke();
+          this.lastPos = { x, y };
+          this.$store.ws.sendDrawEvent("move", x, y);
+        },
+        pointerUp() {
+          if (this.isDrawing && this.lastPos) {
+            this.$store.ws.sendDrawEvent("end", this.lastPos.x, this.lastPos.y);
+          }
+          this.isDrawing = false;
+        },
+        applyRemoteDraw(event) {
+          if (!this.ctx || !event || !event.sourceId) {
+            return;
+          }
+          const key = event.sourceId;
+          if (event.type === "start") {
+            this.ctx.beginPath();
+            this.ctx.moveTo(event.x, event.y);
+            this.remotePaths[key] = { x: event.x, y: event.y };
+            return;
+          }
+          if (event.type === "move" && this.remotePaths[key]) {
+            this.ctx.lineTo(event.x, event.y);
+            this.ctx.stroke();
+            this.remotePaths[key] = { x: event.x, y: event.y };
+            return;
+          }
+          if (event.type === "end") {
+            delete this.remotePaths[key];
+          }
+        },
+        submitGuess() {
+          if (!this.guessText) {
+            return;
+          }
+          const payload = {
+            id: `${this.$store.ws.clientId}-${Date.now()}`,
+            clientId: this.$store.ws.clientId,
+            name: "You",
+            text: this.guessText
+          };
+          window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
+          this.guessText = "";
+        }
+      };
+    }
+
+    function playerPanel() {
+      return {
+        list: [],
+        chatMessages: [],
+        handlePlayerJoined(payload) {
+          if (!payload || !payload.name || !payload.clientId) {
+            return;
+          }
+          if (payload.targetClientId && payload.targetClientId !== this.$store.ws.clientId) {
+            return;
+          }
+          if (this.list.some((player) => player.clientId === payload.clientId)) {
+            return;
+          }
+          this.list.push({ name: payload.name, clientId: payload.clientId });
+        },
+        isSelf(player) {
+          return player && player.clientId === this.$store.ws.clientId;
+        },
+        handleChatMessage(payload) {
+          if (!payload || !payload.text) {
+            return;
+          }
+          this.chatMessages.push(payload);
+        }
+      };
+    }
+
+    function initCanvas(canvasState, refs) {
+      const canvas = refs.draw;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.style.width = `${canvasState.width}px`;
+      canvas.style.height = `${canvasState.height}px`;
+      canvas.width = Math.floor(canvasState.width * dpr);
+      canvas.height = Math.floor(canvasState.height * dpr);
+      canvasState.ctx = canvas.getContext("2d");
+      canvasState.ctx.scale(dpr, dpr);
+      canvasState.ctx.lineWidth = 2;
+      canvasState.ctx.lineCap = "round";
+      canvasState.ctx.strokeStyle = "#1c2430";
+      clearCanvas(canvasState.ctx, canvasState.width, canvasState.height);
+    }
+    function getPos(refs, event) {
+      const rect = refs.draw.getBoundingClientRect();
+      return {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      };
+    }
+    function createClientId() {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
+      return `client-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    }
+    function getStoredClientId() {
+      if (typeof localStorage === "undefined") {
+        return null;
+      }
+      const stored = localStorage.getItem("clientId");
+      return stored && stored.trim() ? stored : null;
+    }
+    function saveClientId(clientId) {
+      if (typeof localStorage === "undefined") {
+        return;
+      }
+      localStorage.setItem("clientId", clientId);
+    }
+    function clearCanvas(canvas_ctx, width, height) {
+      if (!canvas_ctx) return;
+      canvas_ctx.clearRect(0, 0, width, height);
+      canvas_ctx.fillStyle = "#f8fbff";
+      canvas_ctx.fillRect(0, 0, width, height);
+    }
+  </script>
+  </body>
+</html>
