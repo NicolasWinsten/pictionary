@@ -66,27 +66,47 @@
         margin-top: 20px;
         display: inline-grid;
         gap: 12px;
+        align-self: stretch;
+        flex: 1 1 0;
       }
       .game-row {
         display: flex;
-        align-items: flex-start;
+        align-items: stretch;
         gap: 20px;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
       }
       .player-panel {
-        min-width: 200px;
+        min-width: 260px;
+        flex: 0 0 320px;
         background: #fff;
         border-radius: 16px;
         padding: 16px;
         box-shadow: 0 8px 24px rgba(28, 36, 48, 0.1);
-      }
-      .player-columns {
+        align-self: stretch;
         display: flex;
-        align-items: flex-start;
+        min-height: 0;
+        overflow: hidden;
+      }
+      @media (max-width: 900px) {
+        .game-row {
+          flex-wrap: wrap;
+        }
+        .player-panel {
+          flex: 1 1 100%;
+        }
+      }
+      .lobby-info {
+        display: flex;
+        align-items: stretch;
         gap: 16px;
+        flex: 1;
       }
       .player-column {
         min-width: 160px;
+        display: flex;
+        flex-direction: column;
+        flex: 1;
+        min-height: 0;
       }
       .player-list {
         list-style: none;
@@ -94,6 +114,7 @@
         padding: 0;
         display: grid;
         gap: 8px;
+        flex: 0 0 auto;
       }
       .player-item {
         display: flex;
@@ -104,11 +125,32 @@
         background: #f6f7fb;
         font-weight: 600;
       }
+      .player-name.ready {
+        color: #2a8f4a;
+      }
+      .player-name.drawing {
+        border: 3px solid #1c2430;
+        border-radius: 10px;
+        padding: 2px 6px;
+      }
+      .ready-button {
+        margin-top: auto;
+        width: 100%;
+        background: #2a8f4a;
+      }
+      .ready-button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
       .canvas-box {
         border: 1px solid #d8e0ea;
         border-radius: 12px;
         background: #f8fbff;
         padding: 8px;
+      }
+      .canvas-disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
       }
       canvas {
         display: block;
@@ -140,10 +182,13 @@
         border-radius: 12px;
         padding: 10px;
         background: #f8fbff;
-        max-height: 180px;
         overflow-y: auto;
+        max-height: 400px;
         display: grid;
         gap: 6px;
+        flex: 1;
+        align-content: start;
+        min-height: 0;
       }
       .chat-line {
         font-size: 14px;
@@ -185,7 +230,7 @@
   <body>
     <div class="overlay" x-data="lobbyPanel()" x-show="!$store.ws.isConnected" x-transition>
       <div class="lobby-card">
-        <h2>Create a lobby</h2>
+        <h2>Join a lobby</h2>
         <p class="note">Enter your lobby code to start.</p>
         <input
           class="lobby-input"
@@ -215,6 +260,7 @@
             <div class="canvas-box">
               <canvas
                 x-ref="draw"
+                :class="{ 'canvas-disabled': !isDrawer() }"
                 @pointerdown.prevent="pointerDown($event)"
                 @pointermove.prevent="pointerMove($event)"
                 @pointerup="pointerUp()"
@@ -223,38 +269,54 @@
             </div>
             <div class="canvas-tools">
               <button @click="clearCanvas(ctx, width, height)">Clear</button>
-              <div class="guess-bar">
+              <div class="guess-bar" x-data="guessBar()">
                 <input
                   class="guess-input"
                   type="text"
                   placeholder="Type a guess and press Enter"
                   x-model.trim="guessText"
-                  @keydown.enter.prevent="submitGuess()"
+                  @keydown.enter.prevent="submitGuess(guessText, $store.ws); guessText = ''"
                 />
               </div>
             </div>
           </div>
           <aside
             class="player-panel"
-            x-data="playerPanel()"
-            @player-joined.window="handlePlayerJoined($event.detail)"
-            @chat-message.window="handleChatMessage($event.detail)"
           >
-            <div class="player-columns">
-              <div class="player-column">
-                <div class="pill">Players</div>
+            <div class="lobby-info">
+              <div
+                class="player-column"
+                x-data="playerListPanel()"
+                @player-status.window="handlePlayerStatus($event.detail)"
+              >
+                <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || $store.ws.lobbyCode || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in list" :key="`${player.clientId}-${index}`">
                     <li class="player-item">
-                      <span x-text="player.name"></span>
+                      <span
+                        class="player-name"
+                        :class="{ ready: player.isReady, drawing: player.isDrawing }"
+                        x-text="player.name"
+                      ></span>
                       <span class="note" x-show="isSelf(player)">(you)</span>
                     </li>
                   </template>
                 </ul>
+                <button
+                  class="ready-button"
+                  :disabled="isSelfReady()"
+                  @click="sendReady($store.ws)"
+                >
+                  Ready <span x-text="`(${readyCount()}/${list.length})`"></span>
+                </button>
               </div>
-              <div class="player-column">
+              <div
+                class="player-column"
+                x-data="chatPanel()"
+                @chat-message.window="handleChatMessage($event.detail)"
+              >
                 <div class="pill">Guesses</div>
-                <div class="chat-box">
+                <div class="chat-box" x-ref="chatBox">
                   <template x-for="(entry, index) in chatMessages" :key="`${entry.id}-${index}`">
                     <div class="chat-line">
                       <strong x-text="entry.name"></strong>
@@ -284,8 +346,10 @@
         subscribedLobby: null,
         lobbySubscription: null,
         playerSubscription: null,
+        chatSubscription: null,
+        drawerClientId: null,
         ensureClientId() {
-          const storedId = getStoredClientId();
+          // const storedId = getStoredClientId();
           // if (storedId) {
           //   this.clientId = storedId;
           //   return;
@@ -344,7 +408,11 @@
           if (this.playerSubscription) {
             this.playerSubscription.unsubscribe();
           }
+          if (this.chatSubscription) {
+            this.chatSubscription.unsubscribe();
+          }
           this.subscribedLobby = code;
+          this.drawerClientId = null;
           if (!this.stompClient || !this.stompClient.connected) {
             return;
           }
@@ -372,10 +440,39 @@
               } catch (error) {
                 return;
               }
-              if (!payload || !payload.clientId || !payload.name) {
+              if (!payload || !payload.clientId) {
                 return;
               }
-              this.dispatchPlayerJoined(payload);
+              if ((!payload.status || payload.status === "joined") && !payload.name) {
+                return;
+              }
+              if (payload.status === "drawing") {
+                this.drawerClientId = payload.clientId;
+                if (payload.targetClientId && payload.targetClientId === this.clientId) {
+                  const drawerName = payload.name || "A player";
+                  this.dispatchChatMessage({
+                    clientId: "system",
+                    name: "System",
+                    text: `${drawerName} is drawing.`
+                  });
+                }
+              }
+              this.dispatchPlayerStatus(payload);
+            }
+          );
+          this.chatSubscription = this.stompClient.subscribe(
+            `/topic/lobby/${code}/chat`,
+            (message) => {
+              let payload = null;
+              try {
+                payload = JSON.parse(message.body);
+              } catch (error) {
+                return;
+              }
+              if (!payload || !payload.clientId || !payload.name || !payload.text) {
+                return;
+              }
+              this.dispatchChatMessage(payload);
             }
           );
         },
@@ -407,11 +504,20 @@
         sendDrawEvent(type, x, y) {
           this.sendStomp("/app/draw", { type, x, y, sourceId: this.clientId });
         },
+        sendGuess(text) {
+          this.sendStomp("/app/guess", { text });
+        },
+        sendReady() {
+          this.sendStomp("/app/ready", {});
+        },
         dispatchDrawEvent(payload) {
           window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
         },
-        dispatchPlayerJoined(payload) {
-          window.dispatchEvent(new CustomEvent("player-joined", { detail: payload }));
+        dispatchPlayerStatus(payload) {
+          window.dispatchEvent(new CustomEvent("player-status", { detail: payload }));
+        },
+        dispatchChatMessage(payload) {
+          window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
         }
       };
     }
@@ -432,13 +538,12 @@
         lastPos: null,
         isDrawing: false,
         remotePaths: {},
-        guessText: "",
         init() {
           this.$store.ws.ensureClientId();
           initCanvas(this, this.$refs);
         },
         pointerDown(event) {
-          if (!this.ctx) return;
+          if (!this.ctx || !this.isDrawer()) return;
           this.isDrawing = true;
           const { x, y } = getPos(this.$refs, event);
           this.lastPos = { x, y };
@@ -447,7 +552,7 @@
           this.$store.ws.sendDrawEvent("start", x, y);
         },
         pointerMove(event) {
-          if (!this.isDrawing || !this.ctx) return;
+          if (!this.isDrawing || !this.ctx || !this.isDrawer()) return;
           const { x, y } = getPos(this.$refs, event);
           this.ctx.lineTo(x, y);
           this.ctx.stroke();
@@ -455,10 +560,13 @@
           this.$store.ws.sendDrawEvent("move", x, y);
         },
         pointerUp() {
-          if (this.isDrawing && this.lastPos) {
+          if (this.isDrawing && this.lastPos && this.isDrawer()) {
             this.$store.ws.sendDrawEvent("end", this.lastPos.x, this.lastPos.y);
           }
           this.isDrawing = false;
+        },
+        isDrawer() {
+          return this.$store.ws.drawerClientId === this.$store.ws.clientId;
         },
         applyRemoteDraw(event) {
           if (!this.ctx || !event || !event.sourceId) {
@@ -480,47 +588,88 @@
           if (event.type === "end") {
             delete this.remotePaths[key];
           }
-        },
-        submitGuess() {
-          if (!this.guessText) {
-            return;
-          }
-          const payload = {
-            id: `${this.$store.ws.clientId}-${Date.now()}`,
-            clientId: this.$store.ws.clientId,
-            name: "You",
-            text: this.guessText
-          };
-          window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
-          this.guessText = "";
         }
       };
     }
 
-    function playerPanel() {
+    function guessBar() {
+      return {
+        guessText: ""
+      };
+    }
+
+    function playerListPanel() {
       return {
         list: [],
-        chatMessages: [],
-        handlePlayerJoined(payload) {
-          if (!payload || !payload.name || !payload.clientId) {
+        handlePlayerStatus(payload) {
+          if (!payload || !payload.clientId) {
+            return;
+          }
+          if (payload.status === "drawing") {
+            this.list.forEach((player) => {
+              player.isDrawing = player.clientId === payload.clientId;
+            });
+            return;
+          }
+          if (payload.status === "ready") {
+            const existing = this.list.find((player) => player.clientId === payload.clientId);
+            if (existing) {
+              existing.isReady = true;
+              return;
+            }
+          }
+          if (payload.status === "left") {
+            this.list = this.list.filter((player) => player.clientId !== payload.clientId);
+            return;
+          }
+          if (!payload.name) {
             return;
           }
           if (payload.targetClientId && payload.targetClientId !== this.$store.ws.clientId) {
             return;
           }
-          if (this.list.some((player) => player.clientId === payload.clientId)) {
+          const existing = this.list.find((player) => player.clientId === payload.clientId);
+          if (payload.status === "joined" && !existing) {
+            this.list.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
             return;
           }
-          this.list.push({ name: payload.name, clientId: payload.clientId });
+          if (payload.status === "ready") {
+            if (existing) {
+              existing.isReady = true;
+            } else {
+              this.list.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
+            }
+          }
         },
         isSelf(player) {
           return player && player.clientId === this.$store.ws.clientId;
         },
+        isSelfReady() {
+          const selfPlayer = this.list.find((player) => player.clientId === this.$store.ws.clientId);
+          return !!(selfPlayer && selfPlayer.isReady);
+        },
+        readyCount() {
+          return this.list.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
+        }
+      };
+    }
+
+    function chatPanel() {
+      return {
+        chatMessages: [],
         handleChatMessage(payload) {
           if (!payload || !payload.text) {
             return;
           }
           this.chatMessages.push(payload);
+          this.scrollToBottom();
+        },
+        scrollToBottom() {
+          this.$nextTick(() => {
+            if (this.$refs.chatBox) {
+              this.$refs.chatBox.scrollTop = this.$refs.chatBox.scrollHeight;
+            }
+          });
         }
       };
     }
@@ -564,6 +713,18 @@
         return;
       }
       localStorage.setItem("clientId", clientId);
+    }
+    function submitGuess(text, wsStore) {
+      if (!text || !wsStore) {
+        return;
+      }
+      wsStore.sendGuess(text);
+    }
+    function sendReady(wsStore) {
+      if (!wsStore) {
+        return;
+      }
+      wsStore.sendReady();
     }
     function clearCanvas(canvas_ctx, width, height) {
       if (!canvas_ctx) return;
