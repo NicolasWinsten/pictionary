@@ -272,7 +272,7 @@
             </div>
             <div class="canvas-tools">
               <button @click="clearCanvas(ctx, width, height)">Clear</button>
-              <div class="guess-bar" x-data="guessBar()">
+              <div class="guess-bar" x-data="{ guessText: '' }">
                 <input
                   class="guess-input"
                   type="text"
@@ -413,11 +413,6 @@
       };
     }
 
-    function guessBar() {
-      return {
-        guessText: ""
-      };
-    }
 
     function playerListPanel() {
       return {
