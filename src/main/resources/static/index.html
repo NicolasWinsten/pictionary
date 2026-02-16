@@ -228,23 +228,26 @@
     </style>
   </head>
   <body>
-    <div class="overlay" x-data="lobbyPanel()" x-show="!$store.ws.isConnected" x-transition>
+    <!-- Lobby card asking for lobby code-->
+    <div class="overlay" x-data x-show="!$store.ws.isConnected" x-transition>
       <div class="lobby-card">
         <h2>Join a lobby</h2>
         <p class="note">Enter your lobby code to start.</p>
+        <!-- Use x-model attribute to bind the input value to the data lobbyCode-->
         <input
           class="lobby-input"
           type="text"
           placeholder="Lobby code"
           x-model.trim="$store.ws.lobbyCode"
-          @keydown.enter.prevent="connectLobby()"
+          @keydown.enter.prevent="$store.ws.connectLobby()"
         />
         <div class="lobby-actions">
-          <button @click="connectLobby()">Connect</button>
+          <button @click="$store.ws.connectLobby()">Connect</button>
           <span class="pill" x-text="$store.ws.wsStatus"></span>
         </div>
       </div>
     </div>
+
     <div class="wrap">
       <h1>Pictionary</h1>
       <p class="note">Spring Boot + WebSockets + Alpine.js</p>
@@ -518,14 +521,6 @@
         },
         dispatchChatMessage(payload) {
           window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
-        }
-      };
-    }
-
-    function lobbyPanel() {
-      return {
-        connectLobby() {
-          this.$store.ws.connectLobby();
         }
       };
     }

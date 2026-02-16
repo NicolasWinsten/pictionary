@@ -1,6 +1,6 @@
-# Viz Health
+# Pictionary
 
-Spring Boot (Java 21) + Alpine.js example.
+Spring Boot + Alpine.js example.
 
 ## Run
 
@@ -16,7 +16,3 @@ mvn spring-boot:run
 ```
 
 Open http://localhost:8080/ in a browser.
-
-## Endpoints
-
-- `GET /api/hello` returns a JSON greeting.
