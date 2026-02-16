@@ -101,7 +101,7 @@
         gap: 16px;
         flex: 1;
       }
-      .player-column {
+      .column {
         min-width: 160px;
         display: flex;
         flex-direction: column;
@@ -288,13 +288,13 @@
           >
             <div class="lobby-info">
               <div
-                class="player-column"
-                x-data="playerListPanel()"
-                @player-status.window="handlePlayerStatus($data, $event.detail, $store.ws.clientId)"
+                class="column"
+                x-data="{ playerList: [] }"
+                @player-status.window="handlePlayerStatus(playerList, $event.detail, $store.ws.clientId)"
               >
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || $store.ws.lobbyCode || '----'}`"></div>
                 <ul class="player-list">
-                  <template x-for="(player, index) in list" :key="`${player.clientId}-${index}`">
+                  <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
                     <li class="player-item">
                       <span
                         class="player-name"
@@ -307,16 +307,16 @@
                 </ul>
                 <button
                   class="ready-button"
-                  :disabled="isSelfReady(list, $store.ws.clientId)"
+                  :disabled="isSelfReady(playerList, $store.ws.clientId)"
                   @click="sendReady($store.ws)"
                 >
-                  Ready <span x-text="`(${readyCount(list)}/${list.length})`"></span>
+                  Ready <span x-text="`(${readyCount(playerList)}/${playerList.length})`"></span>
                 </button>
               </div>
               <div
-                class="player-column"
-                x-data="chatPanel()"
-                @chat-message.window="handleChatMessage($data, $event.detail, $refs)"
+                class="column"
+                x-data="{ chatMessages: [] }"
+                @chat-message.window="handleChatMessage(chatMessages, $event.detail, $refs)"
               >
                 <div class="pill">Guesses</div>
                 <div class="chat-box" x-ref="chatBox">
@@ -413,18 +413,6 @@
       };
     }
 
-
-    function playerListPanel() {
-      return {
-        list: []
-      };
-    }
-
-    function chatPanel() {
-      return {
-        chatMessages: []
-      };
-    }
 
     function initCanvas(canvasState, refs) {
       const canvas = refs.draw;
@@ -638,11 +626,11 @@
     function dispatchDrawEvent(payload) {
       window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
     }
-    function handleChatMessage(panel, payload, refs) {
+    function handleChatMessage(chatMessages, payload, refs) {
       if (!payload || !payload.text) {
         return;
       }
-      panel.chatMessages.push(payload);
+      chatMessages.push(payload);
       scrollChatToBottom(refs);
     }
     function scrollChatToBottom(refs) {
@@ -652,25 +640,33 @@
         }
       });
     }
-    function handlePlayerStatus(panel, payload, clientId) {
+    /**
+     * Updates the player list based on player status message received from server
+     * */
+    function handlePlayerStatus(players, payload, clientId) {
+      // why would this happen?
       if (!payload || !payload.clientId) {
+        console.error("Invalid player status payload", payload);
         return;
       }
       if (payload.status === "drawing") {
-        panel.list.forEach((player) => {
+        players.forEach((player) => {
           player.isDrawing = player.clientId === payload.clientId;
         });
         return;
       }
       if (payload.status === "ready") {
-        const existing = panel.list.find((player) => player.clientId === payload.clientId);
+        const existing = players.find((player) => player.clientId === payload.clientId);
         if (existing) {
           existing.isReady = true;
           return;
         }
       }
       if (payload.status === "left") {
-        panel.list = panel.list.filter((player) => player.clientId !== payload.clientId);
+        const leftPlayerIndex = players.findIndex((player) => player.clientId === payload.clientId);
+        if (leftPlayerIndex !== -1) {
+          players.splice(leftPlayerIndex, 1);
+        }
         return;
       }
       if (!payload.name) {
@@ -679,31 +675,31 @@
       if (payload.targetClientId && payload.targetClientId !== clientId) {
         return;
       }
-      const existing = panel.list.find((player) => player.clientId === payload.clientId);
+      const existing = players.find((player) => player.clientId === payload.clientId);
       if (payload.status === "joined" && !existing) {
-        panel.list.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
+        players.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
         return;
       }
       if (payload.status === "ready") {
         if (existing) {
           existing.isReady = true;
         } else {
-          panel.list.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
+          players.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
         }
       }
     }
     function isDrawer(wsStore) {
       return wsStore.drawerClientId === wsStore.clientId;
     }
-    function isSelfReady(list, clientId) {
-      const selfPlayer = list.find((player) => player.clientId === clientId);
+    function isSelfReady(playerList, clientId) {
+      const selfPlayer = playerList.find((player) => player.clientId === clientId);
       return !!(selfPlayer && selfPlayer.isReady);
     }
     function isSelf(player, clientId) {
       return player && player.clientId === clientId;
     }
-    function readyCount(list) {
-      return list.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
+    function readyCount(playerList) {
+      return playerList.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
     }
     function clearCanvas(canvas_ctx, width, height) {
       if (!canvas_ctx) return;
