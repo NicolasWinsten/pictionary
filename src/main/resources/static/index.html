@@ -239,10 +239,10 @@
           type="text"
           placeholder="Lobby code"
           x-model.trim="$store.ws.lobbyCode"
-          @keydown.enter.prevent="$store.ws.connectLobby()"
+          @keydown.enter.prevent="connectLobby($store.ws)"
         />
         <div class="lobby-actions">
-          <button @click="$store.ws.connectLobby()">Connect</button>
+          <button @click="connectLobby($store.ws)">Connect</button>
           <span class="pill" x-text="$store.ws.wsStatus"></span>
         </div>
       </div>
@@ -263,7 +263,7 @@
             <div class="canvas-box">
               <canvas
                 x-ref="draw"
-                :class="{ 'canvas-disabled': !isDrawer() }"
+                :class="{ 'canvas-disabled': !isDrawer($store.ws) }"
                 @pointerdown.prevent="pointerDown($event)"
                 @pointermove.prevent="pointerMove($event)"
                 @pointerup="pointerUp()"
@@ -290,7 +290,7 @@
               <div
                 class="player-column"
                 x-data="playerListPanel()"
-                @player-status.window="handlePlayerStatus($event.detail)"
+                @player-status.window="handlePlayerStatus($data, $event.detail, $store.ws.clientId)"
               >
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || $store.ws.lobbyCode || '----'}`"></div>
                 <ul class="player-list">
@@ -301,22 +301,22 @@
                         :class="{ ready: player.isReady, drawing: player.isDrawing }"
                         x-text="player.name"
                       ></span>
-                      <span class="note" x-show="isSelf(player)">(you)</span>
+                      <span class="note" x-show="isSelf(player, $store.ws.clientId)">(you)</span>
                     </li>
                   </template>
                 </ul>
                 <button
                   class="ready-button"
-                  :disabled="isSelfReady()"
+                  :disabled="isSelfReady(list, $store.ws.clientId)"
                   @click="sendReady($store.ws)"
                 >
-                  Ready <span x-text="`(${readyCount()}/${list.length})`"></span>
+                  Ready <span x-text="`(${readyCount(list)}/${list.length})`"></span>
                 </button>
               </div>
               <div
                 class="player-column"
                 x-data="chatPanel()"
-                @chat-message.window="handleChatMessage($event.detail)"
+                @chat-message.window="handleChatMessage($data, $event.detail, $refs)"
               >
                 <div class="pill">Guesses</div>
                 <div class="chat-box" x-ref="chatBox">
@@ -350,178 +350,7 @@
         lobbySubscription: null,
         playerSubscription: null,
         chatSubscription: null,
-        drawerClientId: null,
-        ensureClientId() {
-          // const storedId = getStoredClientId();
-          // if (storedId) {
-          //   this.clientId = storedId;
-          //   return;
-          // }
-          this.clientId = createClientId();
-          saveClientId(this.clientId);
-        },
-        connectLobby() {
-          const code = this.lobbyCode.trim();
-          if (!code) {
-            this.wsStatus = "code required";
-            return;
-          }
-          this.ensureClientId();
-          if (this.stompClient && this.stompClient.connected) {
-            this.sendStomp("/app/lobby", { code, clientId: this.clientId });
-            return;
-          }
-          const stomp = StompJs;
-          if (!stomp || !SockJS) {
-            this.wsStatus = "stomp unavailable";
-            return;
-          }
-          this.wsStatus = "connecting";
-          this.stompClient = new stomp.Client({
-            webSocketFactory: () => new SockJS("/ws"),
-            reconnectDelay: 3000,
-            onConnect: () => {
-              this.isConnected = true;
-              this.wsStatus = "connected";
-              this.subscribeLobby(code);
-              this.flushPending();
-              this.sendStomp("/app/lobby", { code, clientId: this.clientId });
-            },
-            onStompError: () => {
-              this.isConnected = false;
-              this.wsStatus = "error";
-            },
-            onWebSocketClose: () => {
-              this.isConnected = false;
-              this.wsStatus = "disconnected";
-            }
-          });
-          this.stompClient.activate();
-        },
-        subscribeLobby(code) {
-          if (!code) {
-            return;
-          }
-          if (this.subscribedLobby === code && this.lobbySubscription) {
-            return;
-          }
-          if (this.lobbySubscription) {
-            this.lobbySubscription.unsubscribe();
-          }
-          if (this.playerSubscription) {
-            this.playerSubscription.unsubscribe();
-          }
-          if (this.chatSubscription) {
-            this.chatSubscription.unsubscribe();
-          }
-          this.subscribedLobby = code;
-          this.drawerClientId = null;
-          if (!this.stompClient || !this.stompClient.connected) {
-            return;
-          }
-          this.lobbySubscription = this.stompClient.subscribe(
-            `/topic/lobby/${code}/draw`,
-            (message) => {
-              let payload = null;
-              try {
-                payload = JSON.parse(message.body);
-              } catch (error) {
-                return;
-              }
-              if (!payload || payload.sourceId === this.clientId) {
-                return;
-              }
-              this.dispatchDrawEvent(payload);
-            }
-          );
-          this.playerSubscription = this.stompClient.subscribe(
-            `/topic/lobby/${code}/players`,
-            (message) => {
-              let payload = null;
-              try {
-                payload = JSON.parse(message.body);
-              } catch (error) {
-                return;
-              }
-              if (!payload || !payload.clientId) {
-                return;
-              }
-              if ((!payload.status || payload.status === "joined") && !payload.name) {
-                return;
-              }
-              if (payload.status === "drawing") {
-                this.drawerClientId = payload.clientId;
-                if (payload.targetClientId && payload.targetClientId === this.clientId) {
-                  const drawerName = payload.name || "A player";
-                  this.dispatchChatMessage({
-                    clientId: "system",
-                    name: "System",
-                    text: `${drawerName} is drawing.`
-                  });
-                }
-              }
-              this.dispatchPlayerStatus(payload);
-            }
-          );
-          this.chatSubscription = this.stompClient.subscribe(
-            `/topic/lobby/${code}/chat`,
-            (message) => {
-              let payload = null;
-              try {
-                payload = JSON.parse(message.body);
-              } catch (error) {
-                return;
-              }
-              if (!payload || !payload.clientId || !payload.name || !payload.text) {
-                return;
-              }
-              this.dispatchChatMessage(payload);
-            }
-          );
-        },
-        flushPending() {
-          if (!this.stompClient || !this.stompClient.connected) {
-            return;
-          }
-          while (this.pendingMessages.length) {
-            const next = this.pendingMessages.shift();
-            this.stompClient.publish({
-              destination: next.destination,
-              body: next.body,
-              headers: { "content-type": "application/json" }
-            });
-          }
-        },
-        sendStomp(destination, body) {
-          const payload = JSON.stringify(body);
-          if (!this.stompClient || !this.stompClient.connected) {
-            this.pendingMessages.push({ destination, body: payload });
-            return;
-          }
-          this.stompClient.publish({
-            destination,
-            body: payload,
-            headers: { "content-type": "application/json" }
-          });
-        },
-        sendDrawEvent(type, x, y) {
-          this.sendStomp("/app/draw", { type, x, y, sourceId: this.clientId });
-        },
-        sendGuess(text) {
-          this.sendStomp("/app/guess", { text });
-        },
-        sendReady() {
-          this.sendStomp("/app/ready", {});
-        },
-        dispatchDrawEvent(payload) {
-          window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
-        },
-        dispatchPlayerStatus(payload) {
-          window.dispatchEvent(new CustomEvent("player-status", { detail: payload }));
-        },
-        dispatchChatMessage(payload) {
-          window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
-        }
+        drawerClientId: null
       };
     }
 
@@ -534,34 +363,31 @@
         isDrawing: false,
         remotePaths: {},
         init() {
-          this.$store.ws.ensureClientId();
+          ensureClientId(this.$store.ws);
           initCanvas(this, this.$refs);
         },
         pointerDown(event) {
-          if (!this.ctx || !this.isDrawer()) return;
+          if (!this.ctx || !isDrawer(this.$store.ws)) return;
           this.isDrawing = true;
           const { x, y } = getPos(this.$refs, event);
           this.lastPos = { x, y };
           this.ctx.beginPath();
           this.ctx.moveTo(x, y);
-          this.$store.ws.sendDrawEvent("start", x, y);
+          sendDrawEvent(this.$store.ws,"start", x, y);
         },
         pointerMove(event) {
-          if (!this.isDrawing || !this.ctx || !this.isDrawer()) return;
+          if (!this.isDrawing || !this.ctx || !isDrawer(this.$store.ws)) return;
           const { x, y } = getPos(this.$refs, event);
           this.ctx.lineTo(x, y);
           this.ctx.stroke();
           this.lastPos = { x, y };
-          this.$store.ws.sendDrawEvent("move", x, y);
+          sendDrawEvent(this.$store.ws,"move", x, y);
         },
         pointerUp() {
-          if (this.isDrawing && this.lastPos && this.isDrawer()) {
-            this.$store.ws.sendDrawEvent("end", this.lastPos.x, this.lastPos.y);
+          if (this.isDrawing && this.lastPos && isDrawer(this.$store.ws)) {
+            sendDrawEvent(this.$store.ws,"end", this.lastPos.x, this.lastPos.y);
           }
           this.isDrawing = false;
-        },
-        isDrawer() {
-          return this.$store.ws.drawerClientId === this.$store.ws.clientId;
         },
         applyRemoteDraw(event) {
           if (!this.ctx || !event || !event.sourceId) {
@@ -595,77 +421,13 @@
 
     function playerListPanel() {
       return {
-        list: [],
-        handlePlayerStatus(payload) {
-          if (!payload || !payload.clientId) {
-            return;
-          }
-          if (payload.status === "drawing") {
-            this.list.forEach((player) => {
-              player.isDrawing = player.clientId === payload.clientId;
-            });
-            return;
-          }
-          if (payload.status === "ready") {
-            const existing = this.list.find((player) => player.clientId === payload.clientId);
-            if (existing) {
-              existing.isReady = true;
-              return;
-            }
-          }
-          if (payload.status === "left") {
-            this.list = this.list.filter((player) => player.clientId !== payload.clientId);
-            return;
-          }
-          if (!payload.name) {
-            return;
-          }
-          if (payload.targetClientId && payload.targetClientId !== this.$store.ws.clientId) {
-            return;
-          }
-          const existing = this.list.find((player) => player.clientId === payload.clientId);
-          if (payload.status === "joined" && !existing) {
-            this.list.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
-            return;
-          }
-          if (payload.status === "ready") {
-            if (existing) {
-              existing.isReady = true;
-            } else {
-              this.list.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
-            }
-          }
-        },
-        isSelf(player) {
-          return player && player.clientId === this.$store.ws.clientId;
-        },
-        isSelfReady() {
-          const selfPlayer = this.list.find((player) => player.clientId === this.$store.ws.clientId);
-          return !!(selfPlayer && selfPlayer.isReady);
-        },
-        readyCount() {
-          return this.list.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
-        }
+        list: []
       };
     }
 
     function chatPanel() {
       return {
-        chatMessages: [],
-        handleChatMessage(payload) {
-          if (!payload || !payload.text) {
-            return;
-          }
-          this.chatMessages.push(payload);
-          this.scrollToBottom();
-        },
-        scrollToBottom() {
-          this.$nextTick(() => {
-            if (this.$refs.chatBox) {
-              this.$refs.chatBox.scrollTop = this.$refs.chatBox.scrollHeight;
-            }
-          });
-        }
+        chatMessages: []
       };
     }
 
@@ -713,13 +475,240 @@
       if (!text || !wsStore) {
         return;
       }
-      wsStore.sendGuess(text);
+      sendStomp(wsStore,"/app/guess", { text });
     }
     function sendReady(wsStore) {
       if (!wsStore) {
         return;
       }
-      wsStore.sendReady();
+      sendStomp(wsStore,"/app/ready", {});
+    }
+    function connectLobby(wsStore) {
+      const code = wsStore.lobbyCode.trim();
+      if (!code) {
+        wsStore.wsStatus = "code required";
+        return;
+      }
+      ensureClientId(wsStore);
+      if (wsStore.stompClient && wsStore.stompClient.connected) {
+        sendStomp(wsStore, "/app/lobby", { code, clientId: wsStore.clientId });
+        return;
+      }
+      const stomp = StompJs;
+      if (!stomp || !SockJS) {
+        wsStore.wsStatus = "stomp unavailable";
+        return;
+      }
+      wsStore.wsStatus = "connecting";
+      wsStore.stompClient = new stomp.Client({
+        webSocketFactory: () => new SockJS("/ws"),
+        reconnectDelay: 3000,
+        onConnect: () => {
+          wsStore.isConnected = true;
+          wsStore.wsStatus = "connected";
+          subscribeLobby(wsStore, code);
+          flushPending(wsStore);
+          sendStomp(wsStore, "/app/lobby", { code, clientId: wsStore.clientId });
+        },
+        onStompError: () => {
+          wsStore.isConnected = false;
+          wsStore.wsStatus = "error";
+        },
+        onWebSocketClose: () => {
+          wsStore.isConnected = false;
+          wsStore.wsStatus = "disconnected";
+        }
+      });
+      wsStore.stompClient.activate();
+    }
+    function subscribeLobby(wsStore, code) {
+      if (!code) {
+        return;
+      }
+      if (wsStore.subscribedLobby === code && wsStore.lobbySubscription) {
+        return;
+      }
+      if (wsStore.lobbySubscription) {
+        wsStore.lobbySubscription.unsubscribe();
+      }
+      if (wsStore.playerSubscription) {
+        wsStore.playerSubscription.unsubscribe();
+      }
+      if (wsStore.chatSubscription) {
+        wsStore.chatSubscription.unsubscribe();
+      }
+      wsStore.subscribedLobby = code;
+      wsStore.drawerClientId = null;
+      if (!wsStore.stompClient || !wsStore.stompClient.connected) {
+        return;
+      }
+      wsStore.lobbySubscription = wsStore.stompClient.subscribe(
+        `/topic/lobby/${code}/draw`,
+        (message) => {
+          let payload = null;
+          try {
+            payload = JSON.parse(message.body);
+          } catch (error) {
+            return;
+          }
+          if (!payload || payload.sourceId === wsStore.clientId) {
+            return;
+          }
+          dispatchDrawEvent(payload);
+        }
+      );
+      wsStore.playerSubscription = wsStore.stompClient.subscribe(
+        `/topic/lobby/${code}/players`,
+        (message) => {
+          let payload = null;
+          try {
+            payload = JSON.parse(message.body);
+          } catch (error) {
+            return;
+          }
+          if (!payload || !payload.clientId) {
+            return;
+          }
+          if ((!payload.status || payload.status === "joined") && !payload.name) {
+            return;
+          }
+          if (payload.status === "drawing") {
+            wsStore.drawerClientId = payload.clientId;
+            if (payload.targetClientId && payload.targetClientId === wsStore.clientId) {
+              const drawerName = payload.name || "A player";
+              dispatchChatMessage({
+                clientId: "system",
+                name: "System",
+                text: `${drawerName} is drawing.`
+              });
+            }
+          }
+          dispatchPlayerStatus(payload);
+        }
+      );
+      wsStore.chatSubscription = wsStore.stompClient.subscribe(
+        `/topic/lobby/${code}/chat`,
+        (message) => {
+          let payload = null;
+          try {
+            payload = JSON.parse(message.body);
+          } catch (error) {
+            return;
+          }
+          if (!payload || !payload.clientId || !payload.name || !payload.text) {
+            return;
+          }
+          dispatchChatMessage(payload);
+        }
+      );
+    }
+    function sendStomp(wsStore, destination, body) {
+      const payload = JSON.stringify(body);
+      if (!wsStore.stompClient || !wsStore.stompClient.connected) {
+        wsStore.pendingMessages.push({ destination, body: payload });
+        return;
+      }
+      wsStore.stompClient.publish({
+        destination,
+        body: payload,
+        headers: { "content-type": "application/json" }
+      });
+    }
+    function flushPending(wsStore) {
+      if (!wsStore.stompClient || !wsStore.stompClient.connected) {
+        return;
+      }
+      while (wsStore.pendingMessages.length) {
+        const next = wsStore.pendingMessages.shift();
+        wsStore.stompClient.publish({
+          destination: next.destination,
+          body: next.body,
+          headers: { "content-type": "application/json" }
+        });
+      }
+    }
+    function ensureClientId(wsStore) {
+      wsStore.clientId = createClientId();
+      saveClientId(wsStore.clientId);
+    }
+    function sendDrawEvent(wsStore, type, x, y) {
+      sendStomp(wsStore,"/app/draw", { type, x, y, sourceId: wsStore.clientId });
+    }
+    function dispatchPlayerStatus(payload) {
+      window.dispatchEvent(new CustomEvent("player-status", { detail: payload }));
+    }
+    function dispatchChatMessage(payload) {
+      window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
+    }
+    function dispatchDrawEvent(payload) {
+      window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
+    }
+    function handleChatMessage(panel, payload, refs) {
+      if (!payload || !payload.text) {
+        return;
+      }
+      panel.chatMessages.push(payload);
+      scrollChatToBottom(refs);
+    }
+    function scrollChatToBottom(refs) {
+      requestAnimationFrame(() => {
+        if (refs.chatBox) {
+          refs.chatBox.scrollTop = refs.chatBox.scrollHeight;
+        }
+      });
+    }
+    function handlePlayerStatus(panel, payload, clientId) {
+      if (!payload || !payload.clientId) {
+        return;
+      }
+      if (payload.status === "drawing") {
+        panel.list.forEach((player) => {
+          player.isDrawing = player.clientId === payload.clientId;
+        });
+        return;
+      }
+      if (payload.status === "ready") {
+        const existing = panel.list.find((player) => player.clientId === payload.clientId);
+        if (existing) {
+          existing.isReady = true;
+          return;
+        }
+      }
+      if (payload.status === "left") {
+        panel.list = panel.list.filter((player) => player.clientId !== payload.clientId);
+        return;
+      }
+      if (!payload.name) {
+        return;
+      }
+      if (payload.targetClientId && payload.targetClientId !== clientId) {
+        return;
+      }
+      const existing = panel.list.find((player) => player.clientId === payload.clientId);
+      if (payload.status === "joined" && !existing) {
+        panel.list.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
+        return;
+      }
+      if (payload.status === "ready") {
+        if (existing) {
+          existing.isReady = true;
+        } else {
+          panel.list.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
+        }
+      }
+    }
+    function isDrawer(wsStore) {
+      return wsStore.drawerClientId === wsStore.clientId;
+    }
+    function isSelfReady(list, clientId) {
+      const selfPlayer = list.find((player) => player.clientId === clientId);
+      return !!(selfPlayer && selfPlayer.isReady);
+    }
+    function isSelf(player, clientId) {
+      return player && player.clientId === clientId;
+    }
+    function readyCount(list) {
+      return list.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
     }
     function clearCanvas(canvas_ctx, width, height) {
       if (!canvas_ctx) return;
