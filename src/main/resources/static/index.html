@@ -581,6 +581,9 @@
           if (!payload || !payload.clientId || !payload.name || !payload.text) {
             return;
           }
+          if (payload.targetClientId && payload.targetClientId !== wsStore.clientId) {
+            return;
+          }
           dispatchChatMessage(payload);
         }
       );

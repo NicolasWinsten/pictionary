@@ -3,6 +3,7 @@ package com.nicolaswinsten.pictionary.web;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 import com.fasterxml.jackson.annotation.JsonValue;
 
@@ -163,7 +164,7 @@ public class LobbyStompController {
         String text = message.text().trim();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/chat",
-            new GuessMessage(player.clientId(), player.name(), text)
+            new GuessMessage(player.clientId(), player.name(), text, null)
         );
     }
 
@@ -210,6 +211,7 @@ public class LobbyStompController {
             return;
         }
         lobby.drawerClientId = drawer.clientId();
+        lobby.chooseWord();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
             new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, PlayerStatus.DRAWING)
@@ -217,7 +219,11 @@ public class LobbyStompController {
         String label = drawer.name() == null || drawer.name().isBlank() ? "A player" : drawer.name();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/chat",
-            new GuessMessage("system", "System", label + " is drawing.")
+            new GuessMessage("system", "System", label + " is drawing.", null)
+        );
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/chat",
+            new GuessMessage("system", "System", "Your word is: " + lobby.word, drawer.clientId())
         );
     }
 
@@ -314,6 +320,7 @@ public class LobbyStompController {
     static final class Lobby {
         final ConcurrentMap<String, Player> players = new ConcurrentHashMap<>();
         volatile String drawerClientId;
+        volatile String word;
 
         void addPlayer(String sessionId, Player player) {
             players.put(sessionId, player);
@@ -343,6 +350,11 @@ public class LobbyStompController {
 
         boolean isEmpty() {
             return players.isEmpty();
+        }
+
+        /** Picks a random noun from {@link #NOUNS} and stores it as the current word. */
+        void chooseWord() {
+            word = NOUNS[ThreadLocalRandom.current().nextInt(NOUNS.length)];
         }
 
         /** Returns the session ID of the first player found (insertion order). */
@@ -399,6 +411,7 @@ public class LobbyStompController {
     /**
      * Chat/guess message broadcast to {@code /topic/lobby/{code}/chat}.
      * Also used for system announcements (clientId = "system").
+     * @param targetClientId if non-null, only this client should display the message
      */
-    public record GuessMessage(String clientId, String name, String text) {}
+    public record GuessMessage(String clientId, String name, String text, String targetClientId) {}
 }
