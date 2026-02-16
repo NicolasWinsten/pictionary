@@ -4,6 +4,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+import com.fasterxml.jackson.annotation.JsonValue;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
@@ -62,6 +64,12 @@ public class LobbyStompController {
         "Fox", "Otter", "Hawk", "Panda", "Whale", "Lynx", "Robin", "Tiger",
         "Kite", "Finch", "Dolphin", "Raven", "Badger", "Koala", "Heron", "Orca"
     };
+    private static final String[] NOUNS = {
+        "Apple", "Banana", "Car", "Dog", "Elephant", "Flower", "Guitar", "House",
+        "Ice Cream", "Jungle", "Kangaroo", "Lighthouse", "Mountain", "Notebook",
+        "Ocean", "Pizza", "Rainbow", "Sun", "Tree", "Umbrella", "Violin",
+        "Waterfall", "Xylophone", "Yacht", "Zebra"
+    };
 
     public LobbyStompController(SimpMessagingTemplate messagingTemplate) {
         this.messagingTemplate = messagingTemplate;
@@ -97,7 +105,7 @@ public class LobbyStompController {
         sendExistingPlayersToNewcomer(lobby, code, sessionId, clientId);
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(clientId, name, null, "joined")
+            new PlayerStatusMessage(clientId, name, null, PlayerStatus.JOINED)
         );
         LOGGER.info("Lobby joined: code={}, clientId={}, name={}", code, clientId, name);
     }
@@ -170,9 +178,6 @@ public class LobbyStompController {
      */
     @MessageMapping("/ready")
     public void ready(@Header("simpSessionId") String sessionId) {
-        if (sessionId == null) {
-            return;
-        }
         String code = sessionLobby.get(sessionId);
         if (code == null || code.isBlank()) {
             return;
@@ -188,7 +193,7 @@ public class LobbyStompController {
         }
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(player.clientId(), player.name(), null, "ready")
+            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.READY)
         );
         if (lobby.drawerClientId != null) {
             return;
@@ -207,7 +212,7 @@ public class LobbyStompController {
         lobby.drawerClientId = drawer.clientId();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, "drawing")
+            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, PlayerStatus.DRAWING)
         );
         String label = drawer.name() == null || drawer.name().isBlank() ? "A player" : drawer.name();
         messagingTemplate.convertAndSend(
@@ -225,9 +230,6 @@ public class LobbyStompController {
     @EventListener
     public void handleDisconnect(SessionDisconnectEvent event) {
         String sessionId = event.getSessionId();
-        if (sessionId == null) {
-            return;
-        }
         String code = sessionLobby.remove(sessionId);
         if (code == null) {
             return;
@@ -248,7 +250,7 @@ public class LobbyStompController {
         }
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(player.clientId(), player.name(), null, "left")
+            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.LEFT)
         );
     }
 
@@ -279,12 +281,12 @@ public class LobbyStompController {
             }
             messagingTemplate.convertAndSend(
                 "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, "joined")
+                new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.JOINED)
             );
             if (existing.ready()) {
                 messagingTemplate.convertAndSend(
                     "/topic/lobby/" + code + "/players",
-                    new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, "ready")
+                    new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.READY)
                 );
             }
         }
@@ -298,7 +300,7 @@ public class LobbyStompController {
                 .orElse(null);
             messagingTemplate.convertAndSend(
                 "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(drawerClientId, drawerName, targetClientId, "drawing")
+                new PlayerStatusMessage(drawerClientId, drawerName, targetClientId, PlayerStatus.DRAWING)
             );
         }
     }
@@ -366,15 +368,30 @@ public class LobbyStompController {
      */
     public record DrawEvent(String type, double x, double y, String sourceId) {}
 
+    /** The possible states a player status update can communicate. */
+    public enum PlayerStatus {
+        JOINED("joined"),
+        READY("ready"),
+        DRAWING("drawing"),
+        LEFT("left");
+
+        private final String value;
+
+        PlayerStatus(String value) { this.value = value; }
+
+        @JsonValue
+        public String getValue() { return value; }
+    }
+
     /**
      * Broadcast to {@code /topic/lobby/{code}/players} whenever a player's status changes.
      * @param clientId       the player this message is about
      * @param name           the player's display name
      * @param targetClientId if non-null, only this client should apply the message
      *                       (used during newcomer catch-up)
-     * @param status         one of "joined", "ready", "drawing", or "left"
+     * @param status         one of {@link PlayerStatus}
      */
-    public record PlayerStatusMessage(String clientId, String name, String targetClientId, String status) {}
+    public record PlayerStatusMessage(String clientId, String name, String targetClientId, PlayerStatus status) {}
 
     /** Payload received when a player submits a guess ({@code /app/guess}). */
     public record GuessInput(String text) {}
