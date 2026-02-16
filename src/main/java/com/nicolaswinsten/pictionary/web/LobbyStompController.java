@@ -13,15 +13,46 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
+/**
+ * Core game controller — handles every STOMP message and maintains all server-side state.
+ *
+ * <h3>State model</h3>
+ * Game state is organised into {@link Lobby} objects, each containing a map of
+ * {@link Player} records keyed by STOMP session ID.  A lightweight reverse index
+ * ({@code sessionLobby}) maps session IDs back to lobby codes for fast lookup.
+ * Nothing is persisted; a server restart wipes all lobbies.
+ *
+ * <h3>Game lifecycle</h3>
+ * <ol>
+ *   <li><strong>Join</strong> — client sends {@code /app/lobby} with a lobby code and a
+ *       client-generated UUID.  The server stores the mapping, generates a deterministic
+ *       animal name, and broadcasts a "joined" status to the lobby.</li>
+ *   <li><strong>Ready up</strong> — each player sends {@code /app/ready}.  When every player
+ *       in the lobby is ready (and no drawer has been assigned yet), the first player found
+ *       is chosen as drawer.</li>
+ *   <li><strong>Drawing</strong> — the drawer sends pointer events via {@code /app/draw};
+ *       the server verifies the sender is the drawer and re-broadcasts to the lobby.</li>
+ *   <li><strong>Guessing</strong> — non-drawers send guesses via {@code /app/guess};
+ *       the server broadcasts them to the lobby chat.</li>
+ *   <li><strong>Disconnect</strong> — on WebSocket close the server cleans up all session
+ *       state and broadcasts a "left" status.  If the drawer disconnects, the drawer slot
+ *       is cleared.  Empty lobbies are removed from the map.</li>
+ * </ol>
+ *
+ * <h3>Newcomer catch-up</h3>
+ * When a player joins a lobby that already has members, the server replays synthetic
+ * "joined" / "ready" / "drawing" messages targeted at the newcomer so their player list
+ * is immediately up to date (see {@link #sendExistingPlayersToNewcomer}).
+ */
 @Controller
 public class LobbyStompController {
     private static final Logger LOGGER = LoggerFactory.getLogger(LobbyStompController.class);
     private final SimpMessagingTemplate messagingTemplate;
+
+    /** Lobby code → lobby instance. */
+    private final ConcurrentMap<String, Lobby> lobbies = new ConcurrentHashMap<>();
+    /** STOMP session ID → lobby code (reverse index for fast lookup). */
     private final ConcurrentMap<String, String> sessionLobby = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, String> sessionClientId = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, String> sessionPlayerName = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, Boolean> sessionReady = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, String> lobbyDrawerClientId = new ConcurrentHashMap<>();
 
     private static final String[] NAME_PREFIXES = {
         "Brisk", "Sunny", "Clever", "Swift", "Bright", "Quiet", "Bold", "Kind",
@@ -36,6 +67,15 @@ public class LobbyStompController {
         this.messagingTemplate = messagingTemplate;
     }
 
+    /**
+     * Handles a player joining (or re-joining) a lobby.
+     *
+     * <p>Stores session state, generates a display name, replays existing lobby members
+     * to the newcomer, then broadcasts a "joined" status to the whole lobby.
+     *
+     * @param message contains the lobby {@code code} and the client's persistent {@code clientId}
+     * @param sessionId the STOMP session ID injected by Spring
+     */
     @MessageMapping("/lobby")
     public void lobby(LobbyMessage message, @Header("simpSessionId") String sessionId) {
         if (message == null
@@ -48,10 +88,13 @@ public class LobbyStompController {
         }
         String code = message.code().trim();
         String clientId = message.clientId().trim();
-        String name = sessionPlayerName.computeIfAbsent(sessionId, key -> generateName(clientId));
+        String name = generateName(clientId);
+
+        Lobby lobby = lobbies.computeIfAbsent(code, k -> new Lobby());
+        lobby.addPlayer(sessionId, new Player(clientId, name, false));
         sessionLobby.put(sessionId, code);
-        sessionClientId.put(sessionId, clientId);
-        sendExistingPlayersToNewcomer(code, sessionId, clientId);
+
+        sendExistingPlayersToNewcomer(lobby, code, sessionId, clientId);
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
             new PlayerStatusMessage(clientId, name, null, "joined")
@@ -59,6 +102,12 @@ public class LobbyStompController {
         LOGGER.info("Lobby joined: code={}, clientId={}, name={}", code, clientId, name);
     }
 
+    /**
+     * Relays a drawing stroke to every client in the drawer's lobby.
+     *
+     * <p>Only the designated drawer may send draw events — messages from any other
+     * session are silently dropped.
+     */
     @MessageMapping("/draw")
     public void draw(DrawEvent event, @Header("simpSessionId") String sessionId) {
         if (event == null || sessionId == null) {
@@ -68,17 +117,24 @@ public class LobbyStompController {
         if (code == null || code.isBlank()) {
             return;
         }
-        String clientId = sessionClientId.get(sessionId);
-        if (clientId == null || clientId.isBlank()) {
+        Lobby lobby = lobbies.get(code);
+        if (lobby == null) {
             return;
         }
-        String drawerClientId = lobbyDrawerClientId.get(code);
-        if (drawerClientId == null || !drawerClientId.equals(clientId)) {
+        Player player = lobby.players.get(sessionId);
+        if (player == null) {
+            return;
+        }
+        String drawerClientId = lobby.drawerClientId;
+        if (drawerClientId == null || !drawerClientId.equals(player.clientId())) {
             return;
         }
         messagingTemplate.convertAndSend("/topic/lobby/" + code + "/draw", event);
     }
 
+    /**
+     * Broadcasts a player's guess to the lobby chat ({@code /topic/lobby/{code}/chat}).
+     */
     @MessageMapping("/guess")
     public void guess(GuessInput message, @Header("simpSessionId") String sessionId) {
         if (message == null || message.text() == null || message.text().isBlank() || sessionId == null) {
@@ -88,20 +144,32 @@ public class LobbyStompController {
         if (code == null || code.isBlank()) {
             return;
         }
-        String clientId = sessionClientId.get(sessionId);
-        if (clientId == null || clientId.isBlank()) {
+        Lobby lobby = lobbies.get(code);
+        if (lobby == null) {
             return;
         }
-        String name = sessionPlayerName.computeIfAbsent(sessionId, key -> generateName(clientId));
+        Player player = lobby.players.get(sessionId);
+        if (player == null) {
+            return;
+        }
         String text = message.text().trim();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/chat",
-            new GuessMessage(clientId, name, text)
+            new GuessMessage(player.clientId(), player.name(), text)
         );
     }
 
+    /**
+     * Marks a player as ready and, once every player in the lobby is ready,
+     * assigns a drawer and kicks off the drawing round.
+     *
+     * <p>The drawer is chosen by {@link Lobby#findFirstSessionId()} — currently the first
+     * session found in the players map (effectively insertion order).
+     * A drawer is only assigned when <em>all</em> players are ready <em>and</em> no
+     * drawer has been set yet for this lobby.
+     */
     @MessageMapping("/ready")
-    public void ready(ReadyInput message, @Header("simpSessionId") String sessionId) {
+    public void ready(@Header("simpSessionId") String sessionId) {
         if (sessionId == null) {
             return;
         }
@@ -109,90 +177,85 @@ public class LobbyStompController {
         if (code == null || code.isBlank()) {
             return;
         }
-        String clientId = sessionClientId.get(sessionId);
-        if (clientId == null || clientId.isBlank()) {
+        Lobby lobby = lobbies.get(code);
+        if (lobby == null) {
             return;
         }
-        sessionReady.put(sessionId, true);
-        String name = sessionPlayerName.computeIfAbsent(sessionId, key -> generateName(clientId));
+        lobby.markReady(sessionId);
+        Player player = lobby.players.get(sessionId);
+        if (player == null) {
+            return;
+        }
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(clientId, name, null, "ready")
+            new PlayerStatusMessage(player.clientId(), player.name(), null, "ready")
         );
-        if (lobbyDrawerClientId.containsKey(code)) {
+        if (lobby.drawerClientId != null) {
             return;
         }
-        if (!isLobbyReady(code)) {
+        if (!lobby.isReady()) {
             return;
         }
-        String drawerSessionId = findDrawerSessionId(code);
+        String drawerSessionId = lobby.findFirstSessionId();
         if (drawerSessionId == null) {
             return;
         }
-        String drawerClientId = sessionClientId.get(drawerSessionId);
-        if (drawerClientId == null || drawerClientId.isBlank()) {
+        Player drawer = lobby.players.get(drawerSessionId);
+        if (drawer == null) {
             return;
         }
-        String drawerName = sessionPlayerName.get(drawerSessionId);
-        lobbyDrawerClientId.put(code, drawerClientId);
+        lobby.drawerClientId = drawer.clientId();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(drawerClientId, drawerName, null, "drawing")
+            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, "drawing")
         );
-        String label = drawerName == null || drawerName.isBlank() ? "A player" : drawerName;
+        String label = drawer.name() == null || drawer.name().isBlank() ? "A player" : drawer.name();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/chat",
             new GuessMessage("system", "System", label + " is drawing.")
         );
     }
 
+    /**
+     * Cleans up all server-side state when a WebSocket connection closes,
+     * and notifies the lobby that the player has left.
+     * If the disconnecting player was the drawer, the drawer slot is cleared.
+     * Empty lobbies are removed from the map.
+     */
     @EventListener
     public void handleDisconnect(SessionDisconnectEvent event) {
         String sessionId = event.getSessionId();
         if (sessionId == null) {
             return;
         }
-        String code = sessionLobby.get(sessionId);
-        String clientId = sessionClientId.get(sessionId);
-        String name = sessionPlayerName.get(sessionId);
-        sessionLobby.remove(sessionId);
-        sessionClientId.remove(sessionId);
-        sessionPlayerName.remove(sessionId);
-        sessionReady.remove(sessionId);
-        if (code != null && clientId != null && clientId.equals(lobbyDrawerClientId.get(code))) {
-            lobbyDrawerClientId.remove(code);
+        String code = sessionLobby.remove(sessionId);
+        if (code == null) {
+            return;
         }
-        if (code != null && !code.isBlank() && clientId != null && !clientId.isBlank()) {
-            messagingTemplate.convertAndSend(
-                "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(clientId, name, null, "left")
-            );
+        Lobby lobby = lobbies.get(code);
+        if (lobby == null) {
+            return;
         }
+        Player player = lobby.removePlayer(sessionId);
+        if (player == null) {
+            return;
+        }
+        if (player.clientId().equals(lobby.drawerClientId)) {
+            lobby.drawerClientId = null;
+        }
+        if (lobby.isEmpty()) {
+            lobbies.remove(code);
+        }
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/players",
+            new PlayerStatusMessage(player.clientId(), player.name(), null, "left")
+        );
     }
 
-    private boolean isLobbyReady(String code) {
-        boolean hasPlayer = false;
-        for (String sessionId : sessionLobby.keySet()) {
-            if (!code.equals(sessionLobby.get(sessionId))) {
-                continue;
-            }
-            hasPlayer = true;
-            if (!Boolean.TRUE.equals(sessionReady.get(sessionId))) {
-                return false;
-            }
-        }
-        return hasPlayer;
-    }
-
-    private String findDrawerSessionId(String code) {
-        for (String sessionId : sessionLobby.keySet()) {
-            if (code.equals(sessionLobby.get(sessionId))) {
-                return sessionId;
-            }
-        }
-        return null;
-    }
-
+    /**
+     * Derives a deterministic "Adjective Animal" display name from a client ID.
+     * The same client ID always produces the same name (e.g. "Brisk Fox").
+     */
     private static String generateName(String clientId) {
         int hash = Math.abs(clientId.hashCode());
         String prefix = NAME_PREFIXES[hash % NAME_PREFIXES.length];
@@ -200,35 +263,39 @@ public class LobbyStompController {
         return prefix + " " + suffix;
     }
 
-    private void sendExistingPlayersToNewcomer(String code, String sessionId, String targetClientId) {
-        sessionLobby.forEach((existingSessionId, existingCode) -> {
-            if (!code.equals(existingCode) || existingSessionId.equals(sessionId)) {
-                return;
-            }
-            String existingClientId = sessionClientId.get(existingSessionId);
-            String existingName = sessionPlayerName.get(existingSessionId);
-            if (existingClientId == null || existingName == null) {
-                return;
+    /**
+     * Replays "joined", "ready", and "drawing" messages for every existing lobby member
+     * so a late-joining client immediately sees the full player list.
+     *
+     * <p>Messages are sent with {@code targetClientId} set so the frontend can filter
+     * them and only apply them to the newcomer's UI.
+     */
+    private void sendExistingPlayersToNewcomer(Lobby lobby, String code, String sessionId, String targetClientId) {
+        for (Map.Entry<String, Player> entry : lobby.players.entrySet()) {
+            String existingSessionId = entry.getKey();
+            Player existing = entry.getValue();
+            if (existingSessionId.equals(sessionId)) {
+                continue;
             }
             messagingTemplate.convertAndSend(
                 "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(existingClientId, existingName, targetClientId, "joined")
+                new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, "joined")
             );
-            if (Boolean.TRUE.equals(sessionReady.get(existingSessionId))) {
+            if (existing.ready()) {
                 messagingTemplate.convertAndSend(
                     "/topic/lobby/" + code + "/players",
-                    new PlayerStatusMessage(existingClientId, existingName, targetClientId, "ready")
+                    new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, "ready")
                 );
             }
-        });
-        String drawerClientId = lobbyDrawerClientId.get(code);
+        }
+        String drawerClientId = lobby.drawerClientId;
         if (drawerClientId != null && !drawerClientId.isBlank()) {
-            String drawerSessionId = sessionClientId.entrySet().stream()
-                .filter(entry -> drawerClientId.equals(entry.getValue()))
-                .map(java.util.Map.Entry::getKey)
+            // Find the drawer's name from the players map
+            String drawerName = lobby.players.values().stream()
+                .filter(p -> drawerClientId.equals(p.clientId()))
+                .map(Player::name)
                 .findFirst()
                 .orElse(null);
-            String drawerName = drawerSessionId == null ? null : sessionPlayerName.get(drawerSessionId);
             messagingTemplate.convertAndSend(
                 "/topic/lobby/" + code + "/players",
                 new PlayerStatusMessage(drawerClientId, drawerName, targetClientId, "drawing")
@@ -236,10 +303,85 @@ public class LobbyStompController {
         }
     }
 
+    // ── Inner data types ─────────────────────────────────────────────────────
+
+    /** Immutable snapshot of a player's state. Replaced atomically when {@code ready} changes. */
+    record Player(String clientId, String name, boolean ready) {}
+
+    /** Mutable, thread-safe lobby containing players and the current drawer. */
+    static final class Lobby {
+        final ConcurrentMap<String, Player> players = new ConcurrentHashMap<>();
+        volatile String drawerClientId;
+
+        void addPlayer(String sessionId, Player player) {
+            players.put(sessionId, player);
+        }
+
+        Player removePlayer(String sessionId) {
+            return players.remove(sessionId);
+        }
+
+        /** Replaces the player record with {@code ready = true}. */
+        void markReady(String sessionId) {
+            players.computeIfPresent(sessionId, (k, p) -> new Player(p.clientId(), p.name(), true));
+        }
+
+        /** Returns {@code true} when at least one player exists and every player is ready. */
+        boolean isReady() {
+            if (players.isEmpty()) {
+                return false;
+            }
+            for (Player p : players.values()) {
+                if (!p.ready()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        boolean isEmpty() {
+            return players.isEmpty();
+        }
+
+        /** Returns the session ID of the first player found (insertion order). */
+        String findFirstSessionId() {
+            Map.Entry<String, Player> first = players.entrySet().iterator().hasNext()
+                ? players.entrySet().iterator().next()
+                : null;
+            return first == null ? null : first.getKey();
+        }
+    }
+
+    // ── DTOs (deserialized from / serialized to JSON by Spring) ──────────────
+
+    /** Payload sent by the client when joining a lobby ({@code /app/lobby}). */
     public record LobbyMessage(String code, String clientId) {}
+
+    /**
+     * A single pointer event in a drawing stroke ({@code /app/draw}).
+     * @param type  "start", "move", or "end"
+     * @param x     normalised x coordinate on the canvas
+     * @param y     normalised y coordinate on the canvas
+     * @param sourceId  client ID of the drawer (used by the frontend to ignore own echoes)
+     */
     public record DrawEvent(String type, double x, double y, String sourceId) {}
+
+    /**
+     * Broadcast to {@code /topic/lobby/{code}/players} whenever a player's status changes.
+     * @param clientId       the player this message is about
+     * @param name           the player's display name
+     * @param targetClientId if non-null, only this client should apply the message
+     *                       (used during newcomer catch-up)
+     * @param status         one of "joined", "ready", "drawing", or "left"
+     */
     public record PlayerStatusMessage(String clientId, String name, String targetClientId, String status) {}
-    public record ReadyInput() {}
+
+    /** Payload received when a player submits a guess ({@code /app/guess}). */
     public record GuessInput(String text) {}
+
+    /**
+     * Chat/guess message broadcast to {@code /topic/lobby/{code}/chat}.
+     * Also used for system announcements (clientId = "system").
+     */
     public record GuessMessage(String clientId, String name, String text) {}
 }
