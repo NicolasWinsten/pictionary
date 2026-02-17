@@ -66,10 +66,28 @@ public class LobbyStompController {
         "Kite", "Finch", "Dolphin", "Raven", "Badger", "Koala", "Heron", "Orca"
     };
     private static final String[] NOUNS = {
-        "Apple", "Banana", "Car", "Dog", "Elephant", "Flower", "Guitar", "House",
-        "Ice Cream", "Jungle", "Kangaroo", "Lighthouse", "Mountain", "Notebook",
-        "Ocean", "Pizza", "Rainbow", "Sun", "Tree", "Umbrella", "Violin",
-        "Waterfall", "Xylophone", "Yacht", "Zebra"
+        // Easy
+        "Apple", "Banana", "Car", "Dog", "Cat", "Sun", "Tree", "House",
+        "Fish", "Ball", "Hat", "Star", "Moon", "Book", "Flower", "Bird",
+        "Cake", "Door", "Key", "Egg", "Cup", "Boat", "Shoe", "Bell",
+        "Cloud",
+        // Medium
+        "Guitar", "Elephant", "Pizza", "Rainbow", "Bicycle", "Snowman",
+        "Volcano", "Penguin", "Pirate", "Robot", "Dragon", "Mermaid",
+        "Cactus", "Anchor", "Igloo", "Compass", "Hammock", "Lantern",
+        "Scarecrow", "Telescope", "Windmill", "Jellyfish", "Campfire",
+        "Treasure", "Surfboard", "Lighthouse", "Waterfall", "Parachute",
+        "Fireworks", "Kangaroo", "Pineapple", "Astronaut", "Skateboard",
+        "Trampoline", "Mushroom", "Suitcase", "Tornado", "Submarine",
+        "Flamingo", "Butterfly", "Dinosaur", "Helicopter", "Snowflake",
+        "Popcorn", "Giraffe", "Sandwich", "Tadpole", "Pretzel",
+        // Hard
+        "Eclipse", "Mirage", "Quicksand", "Avalanche", "Hibernate",
+        "Reflection", "Silhouette", "Constellation", "Camouflage",
+        "Electricity", "Gravity", "Evolution", "Photosynthesis",
+        "Labyrinth", "Kaleidoscope", "Hieroglyphics", "Ventriloquist",
+        "Claustrophobia", "Sarcasm", "Nostalgia", "Paradox",
+        "Superstition", "Democracy", "Encryption", "Perspective"
     };
 
     public LobbyStompController(SimpMessagingTemplate messagingTemplate) {
