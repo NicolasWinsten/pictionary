@@ -128,9 +128,9 @@
       .player-name.ready {
         color: #2a8f4a;
       }
-      .player-name.drawing {
+      .player-item.drawing {
         font-weight: bold;
-        text-decoration: underline overline;
+        background-color: #baf3d1;
       }
       .ready-button {
         margin-top: auto;
@@ -277,7 +277,7 @@
                 <input
                   class="guess-input"
                   type="text"
-                  x-bind:placeholder="$store.ws.isDrawer ? '' : 'Type a guess and press Enter'"
+                  x-bind:placeholder="$store.ws.isDrawer ? 'You are drawing' : 'Type a guess and press Enter'"
                   x-model.trim="guessText"
                   x-bind:disabled="$store.ws.isDrawer"
                   @keydown.enter.prevent="submitGuess(guessText, $store.ws); guessText = ''"
@@ -297,10 +297,10 @@
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
-                    <li class="player-item">
+                    <li class="player-item" :class="{ drawing: player.isDrawing }">
                       <span
                         class="player-name"
-                        :class="{ ready: player.isReady, drawing: player.isDrawing }"
+                        :class="{ ready: player.isReady }"
                         x-text="player.name"
                       ></span>
                       <span>
