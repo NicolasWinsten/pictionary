@@ -129,9 +129,8 @@
         color: #2a8f4a;
       }
       .player-name.drawing {
-        border: 3px solid #1c2430;
-        border-radius: 10px;
-        padding: 2px 6px;
+        font-weight: bold;
+        text-decoration: underline overline;
       }
       .ready-button {
         margin-top: auto;
@@ -297,7 +296,7 @@
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
-                    <li class="player-item" :class="{ drawing: player.isDrawing  }">
+                    <li class="player-item">
                       <span
                         class="player-name"
                         :class="{ ready: player.isReady, drawing: player.isDrawing }"
@@ -397,7 +396,7 @@
           sendDrawEvent(this.$store.ws, "clear", 0, 0);
         },
         applyRemoteDraw(event) {
-          if (!this.ctx || !event || !event.sourceId) {
+          if (!this.ctx || !event) {
             return;
           }
           if (event.type === "clear") {
@@ -515,6 +514,33 @@
       });
       wsStore.stompClient.activate();
     }
+
+    /**
+     * Subscribes to a STOMP endpoint and registers the callback to be executed when messages are received.
+     * */
+    function makeStompSubscriber(ws, endpoint, callback) {
+      if (!ws.stompClient || !ws.stompClient.connected) {
+        console.error("Cannot subscribe to stomp endpoint when client is not connected");
+        return;
+      }
+      const subscription = ws.stompClient.subscribe(endpoint, (message) => {
+        let payload = null;
+        try {
+          payload = JSON.parse(message.body);
+        } catch (error) {
+          console.error("Failed to parse message body", error);
+          return;
+        }
+        // silently drop the message if this client is not the intended recipient
+        if (payload.targetClientId && payload.targetClientId !== ws.clientId) {
+          return;
+        }
+        console.log("Received message on endpoint", endpoint, payload);
+        callback(payload);
+      });
+      ws.subscriptions.push(subscription);
+    }
+
     function subscribeLobby(wsStore, code) {
       if (!code) {
         return;
@@ -530,89 +556,43 @@
       if (!wsStore.stompClient || !wsStore.stompClient.connected) {
         return;
       }
-      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
-        `/topic/lobby/${code}/draw`,
-        (message) => {
-          let payload = null;
-          try {
-            payload = JSON.parse(message.body);
-          } catch (error) {
-            return;
-          }
-          if (!payload || payload.sourceId === wsStore.clientId) {
-            return;
-          }
+
+      // handle draw event messages
+      makeStompSubscriber(wsStore, `/topic/lobby/${code}/draw`, payload => { 
+        // ignore draw events that originated from this client
+        if (payload.sourceId !== wsStore.clientId) {
           dispatchDrawEvent(payload);
         }
-      ));
-      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
-        `/topic/lobby/${code}/players`,
-        (message) => {
-          let payload = null;
-          try {
-            payload = JSON.parse(message.body);
-          } catch (error) {
-            return;
-          }
-          if (!payload || !payload.clientId) {
-            return;
-          }
-          if ((!payload.status || payload.status === "joined") && !payload.name) {
-            return;
-          }
-          if (payload.status === "drawing") {
+      });
+      // handle player status messages
+      makeStompSubscriber(wsStore, `/topic/lobby/${code}/players`, payload => {
+        switch (payload.status) {
+          case "joined":
+            break;
+          case "left":
+            break;
+          case "ready":
+            break;
+          case "drawing":
             wsStore.isDrawer = payload.clientId === wsStore.clientId;
             if (!wsStore.isDrawer) {
               wsStore.currentWord = null;
             }
-            if (payload.targetClientId && payload.targetClientId === wsStore.clientId) {
-              const drawerName = payload.name || "A player";
-              dispatchChatMessage({
-                clientId: "system",
-                name: "System",
-                text: `${drawerName} is drawing.`
-              });
-            }
-          }
-          dispatchPlayerStatus(payload);
+            break;
+          case "scored":
+            break;
+          default:
+            console.error("Unknown player status", payload.status);
+            return;
         }
-      ));
-      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
-        `/topic/lobby/${code}/chat`,
-        (message) => {
-          let payload = null;
-          try {
-            payload = JSON.parse(message.body);
-          } catch (error) {
-            return;
-          }
-          if (!payload || !payload.clientId || !payload.name || !payload.text) {
-            return;
-          }
-          if (payload.targetClientId && payload.targetClientId !== wsStore.clientId) {
-            return;
-          }
-          dispatchChatMessage(payload);
-        }
-      ));
-      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
-        `/topic/lobby/${code}/word`,
-        (message) => {
-          let payload = null;
-          try {
-            payload = JSON.parse(message.body);
-          } catch (error) {
-            return;
-          }
-          if (!payload || !payload.word) {
-            return;
-          }
-          if (payload.targetClientId && payload.targetClientId !== wsStore.clientId) {
-            return;
-          }
-          wsStore.currentWord = payload.word;
-        }
-      ));
+        dispatchPlayerStatus(payload);
+      });
+      // handle chat messages
+      makeStompSubscriber(wsStore, `/topic/lobby/${code}/chat`, dispatchChatMessage)
+      // handle word assignment messages
+      makeStompSubscriber(wsStore, `/topic/lobby/${code}/word`, payload => {
+        wsStore.currentWord = payload.word;
+      });
     }
 
     function sendStomp(client, destination, body) {
