@@ -228,12 +228,18 @@
     </style>
   </head>
   <body>
-    <!-- Lobby card asking for lobby code-->
+
+    <!-- ============================================================
+         LOBBY OVERLAY
+         Full-screen overlay shown when the client is not connected.
+         Prompts the user to enter a lobby code and connect via WebSocket.
+         Hidden once the connection is established.
+         ============================================================ -->
     <div class="overlay" x-data="{ lobbyCodeInput: '' }" x-show="!$store.ws.isConnected" x-transition>
       <div class="lobby-card">
         <h2>Join a lobby</h2>
         <p class="note">Enter your lobby code to start.</p>
-        <!-- Use x-model attribute to bind the input value to the data lobbyCode-->
+        <!-- Two-way bind input value to lobbyCodeInput via x-model -->
         <input
           class="lobby-input"
           type="text"
@@ -243,25 +249,39 @@
         />
         <div class="lobby-actions">
           <button @click="connectLobby($store.ws, lobbyCodeInput)">Connect</button>
+          <!-- Displays current WebSocket status (disconnected / connecting / connected / error) -->
           <span class="pill" x-text="$store.ws.wsStatus"></span>
         </div>
       </div>
     </div>
 
+    <!-- ============================================================
+         MAIN GAME AREA
+         Visible after connection. Contains the drawing canvas,
+         player list, and chat/guess panel arranged side-by-side.
+         ============================================================ -->
     <div class="wrap">
       <h1>Pictionary</h1>
       <p class="note">Spring Boot + WebSockets + Alpine.js</p>
 
       <div class="card">
         <div class="game-row">
+
+          <!-- ========== CANVAS PANEL ==========
+               Alpine component (canvasPanel) that owns the <canvas> element.
+               Handles local drawing via pointer events and renders remote
+               draw events received through the "draw-event" custom window event. -->
           <div
             class="canvas-wrap"
             x-data="canvasPanel()"
             x-init="init()"
             @draw-event.window="applyRemoteDraw($event.detail)"
           >
+            <!-- Shows the word to draw (only visible to the current drawer) -->
             <div class="pill" x-show="$store.ws.currentWord" x-text="`Draw: ${$store.ws.currentWord}`"></div>
             <div class="canvas-box">
+              <!-- Drawing canvas. Disabled (via CSS class) when the player is not the drawer.
+                   Pointer events drive local stroke rendering and emit STOMP draw messages. -->
               <canvas
                 x-ref="draw"
                 :class="{ 'canvas-disabled': !$store.ws.isDrawer }"
@@ -271,6 +291,8 @@
                 @pointerleave="pointerUp()"
               ></canvas>
             </div>
+            <!-- Canvas toolbar: clear button (drawer only) and guess input (non-drawers).
+                 Guesses are sent to the server via STOMP on Enter. -->
             <div class="canvas-tools">
               <button @click="sendClear()">Clear</button>
               <div class="guess-bar" x-data="{ guessText: '' }">
@@ -285,15 +307,20 @@
               </div>
             </div>
           </div>
-          <aside
-            class="player-panel"
-          >
+          <!-- ========== SIDE PANEL (players + chat) ========== -->
+          <aside class="player-panel">
             <div class="lobby-info">
+
+              <!-- ===== PLAYER LIST COLUMN =====
+                   Maintains a reactive playerList array. The "player-status"
+                   custom event (dispatched from STOMP callbacks) drives updates
+                   for joins, leaves, ready state, drawing state, and scores. -->
               <div
                 class="column"
                 x-data="{ playerList: [] }"
                 @player-status.window="handlePlayerStatus(playerList, $event.detail, $store.ws.clientId)"
               >
+                <!-- Current lobby code badge -->
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
@@ -310,6 +337,8 @@
                     </li>
                   </template>
                 </ul>
+                <!-- Ready button. Disabled once the local player has already readied up.
+                     Displays a "(ready/total)" counter. -->
                 <button
                   class="ready-button"
                   :disabled="isSelfReady(playerList, $store.ws.clientId)"
@@ -318,10 +347,13 @@
                   Ready <span x-text="`(${readyCount(playerList)}/${playerList.length})`"></span>
                 </button>
               </div>
+              <!-- ===== CHAT / GUESSES COLUMN =====
+                   Displays incoming guess messages from all players.
+                   Auto-scrolls to the bottom when new messages arrive. -->
               <div
                 class="column"
                 x-data="{ chatMessages: [] }"
-                @chat-message.window="handleChatMessage(chatMessages, $event.detail, $refs)"
+                @chat-message.window="handleChatMessage(chatMessages, $event.detail, $refs.chatBox)"
               >
                 <div class="pill">Guesses</div>
                 <div class="chat-box" x-ref="chatBox">
@@ -339,10 +371,29 @@
       </div>
     </div>
   <script>
+    /* ================================================================
+       APPLICATION INITIALIZATION
+       On Alpine's init event, create the global "ws" store that holds
+       all WebSocket/STOMP state shared across components.
+       ================================================================ */
     document.addEventListener("alpine:init", () => {
       Alpine.store("ws", createWsStore());
     });
 
+    /**
+     * Creates the global Alpine store for WebSocket state.
+     * Properties:
+     *  - isConnected:     whether the STOMP client is connected
+     *  - stompClient:     the StompJs.Client instance
+     *  - pendingMessages: messages queued while disconnected
+     *  - clientId:        unique persistent ID for this browser tab
+     *  - wsStatus:        human-readable connection status string
+     *  - subscribedLobby: lobby code currently subscribed to
+     *  - subscriptions:   active STOMP subscription objects
+     *  - isDrawer:        whether this client is the current drawer
+     *  - currentWord:     the word assigned to the drawer (null for guessers)
+     * @returns {Object} Alpine reactive store
+     */
     function createWsStore() {
       return {
         isConnected: false,
@@ -357,6 +408,12 @@
       };
     }
 
+    /**
+     * Alpine data component for the drawing canvas.
+     * Manages local drawing state (pen position, stroke in progress),
+     * emits draw events to the server, and applies incoming remote draw events.
+     * @returns {Object} Alpine component definition
+     */
     function canvasPanel() {
       return {
         ctx: null,
@@ -426,6 +483,12 @@
     }
 
 
+    /**
+     * Initializes the <canvas> element: sets CSS/pixel dimensions accounting for
+     * device pixel ratio, configures stroke style, and fills with background color.
+     * @param {Object} canvasState - The canvasPanel Alpine component state
+     * @param {Object} refs        - Alpine $refs containing the "draw" canvas element
+     */
     function initCanvas(canvasState, refs) {
       const canvas = refs.draw;
       const dpr = window.devicePixelRatio || 1;
@@ -440,6 +503,7 @@
       canvasState.ctx.strokeStyle = "#1c2430";
       clearCanvas(canvasState.ctx, canvasState.width, canvasState.height);
     }
+    /** Converts a pointer event's page coordinates to canvas-local coordinates. */
     function getPos(refs, event) {
       const rect = refs.draw.getBoundingClientRect();
       return {
@@ -447,12 +511,14 @@
         y: event.clientY - rect.top
       };
     }
+    /** Generates a new random client ID using crypto.randomUUID or a timestamp fallback. */
     function createClientId() {
       if (typeof crypto !== "undefined" && crypto.randomUUID) {
         return crypto.randomUUID();
       }
       return `client-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
     }
+    /** Retrieves the client ID from localStorage, or null if not set. */
     function getStoredClientId() {
       if (typeof localStorage === "undefined") {
         return null;
@@ -460,24 +526,34 @@
       const stored = localStorage.getItem("clientId");
       return stored && stored.trim() ? stored : null;
     }
+    /** Persists the client ID to localStorage for reuse across page reloads. */
     function saveClientId(clientId) {
       if (typeof localStorage === "undefined") {
         return;
       }
       localStorage.setItem("clientId", clientId);
     }
+    /** Sends a guess message to the server via STOMP /app/guess endpoint. */
     function submitGuess(text, wsStore) {
       if (!text || !wsStore) {
         return;
       }
       sendStomp(wsStore.stompClient,"/app/guess", { text });
     }
+    /** Sends a ready signal to the server via STOMP /app/ready endpoint. */
     function sendReady(wsStore) {
       if (!wsStore) {
         return;
       }
       sendStomp(wsStore.stompClient,"/app/ready", {});
     }
+    /**
+     * Connects to a lobby. If already connected, sends the lobby join message directly.
+     * Otherwise, creates a new SockJS/STOMP client, establishes the connection,
+     * subscribes to the lobby's STOMP topics, and then sends the join message.
+     * @param {Object} wsStore  - The global Alpine "ws" store
+     * @param {string} lobbyCode - The lobby code entered by the user
+     */
     function connectLobby(wsStore, lobbyCode) {
       const code = lobbyCode.trim();
       if (!code) {
@@ -534,6 +610,7 @@
         }
         // silently drop the message if this client is not the intended recipient
         if (payload.targetClientId && payload.targetClientId !== ws.clientId) {
+          console.log("Received message for different client, ignoring", payload);
           return;
         }
         console.log("Received message on endpoint", endpoint, payload);
@@ -542,6 +619,14 @@
       ws.subscriptions.push(subscription);
     }
 
+    /**
+     * Subscribes to all STOMP topics for a lobby: draw events, player status,
+     * chat messages, and word assignments. Unsubscribes from any previous lobby first.
+     * Incoming messages are dispatched as custom window events so that Alpine
+     * components can react via @event.window directives.
+     * @param {Object} wsStore - The global Alpine "ws" store
+     * @param {string} code    - The lobby code to subscribe to
+     */
     function subscribeLobby(wsStore, code) {
       if (!code) {
         return;
@@ -596,6 +681,13 @@
       });
     }
 
+    /**
+     * Publishes a JSON message to a STOMP destination. If the client is not yet
+     * connected, the message is queued in pendingMessages to be flushed later.
+     * @param {Object} client      - The StompJs.Client instance (may be null)
+     * @param {string} destination - STOMP destination (e.g. "/app/draw")
+     * @param {Object} body        - Message payload (will be JSON-stringified)
+     */
     function sendStomp(client, destination, body) {
       const payload = JSON.stringify(body);
       if (!client || !client.connected) {
@@ -609,6 +701,7 @@
       });
     }
     
+    /** Sends all messages that were queued while the STOMP client was disconnected. */
     function flushPending(wsStore) {
       if (!wsStore.stompClient || !wsStore.stompClient.connected) {
         return;
@@ -622,105 +715,120 @@
         });
       }
     }
+    /** Returns the persisted client ID from localStorage, or creates and stores a new one. */
     function getClientId() {
-      const stored = getStoredClientId();
-      if (stored) return stored;
+      // I would try to retrieve the client ID from localStorage
+      // but that means I can't test multiple clients in the same browser, which is a pain during development
+      // const stored = getStoredClientId();
+      // if (stored) return stored;
       const id = createClientId();
       saveClientId(id);
       return id;
     }
+    /** Sends a draw event (start/move/end/clear) with coordinates to the server. */
     function sendDrawEvent(wsStore, type, x, y) {
       sendStomp(wsStore.stompClient,"/app/draw", { type, x, y, sourceId: wsStore.clientId });
     }
+    /* ================================================================
+       EVENT DISPATCHERS
+       Bridge between STOMP subscription callbacks and Alpine components.
+       Each dispatcher fires a custom window event that Alpine components
+       listen to via @event.window directives.
+       ================================================================ */
+
+    /** Dispatches a "player-status" custom event to update the player list UI. */
     function dispatchPlayerStatus(payload) {
       window.dispatchEvent(new CustomEvent("player-status", { detail: payload }));
     }
+    /** Dispatches a "chat-message" custom event to display a new guess in the chat. */
     function dispatchChatMessage(payload) {
       window.dispatchEvent(new CustomEvent("chat-message", { detail: payload }));
     }
+    /** Dispatches a "draw-event" custom event to render a remote player's stroke on the canvas. */
     function dispatchDrawEvent(payload) {
       window.dispatchEvent(new CustomEvent("draw-event", { detail: payload }));
     }
-    function handleChatMessage(chatMessages, payload, refs) {
+    /* ================================================================
+       EVENT HANDLERS
+       Called by Alpine components in response to dispatched custom events.
+       These update the reactive data arrays that drive the UI.
+       ================================================================ */
+
+    /** Appends a new chat message to the list and auto-scrolls to the bottom. */
+    function handleChatMessage(chatMessages, payload, chatBoxRef) {
       if (!payload || !payload.text) {
         return;
       }
       chatMessages.push(payload);
-      scrollChatToBottom(refs);
+      scrollChatToBottom(chatBoxRef);
     }
-    function scrollChatToBottom(refs) {
+    /** Scrolls the chat container to the bottom on the next animation frame. */
+    function scrollChatToBottom(chatBoxRef) {
       requestAnimationFrame(() => {
-        if (refs.chatBox) {
-          refs.chatBox.scrollTop = refs.chatBox.scrollHeight;
+        if (chatBoxRef) {
+          chatBoxRef.scrollTop = chatBoxRef.scrollHeight;
         }
       });
     }
     /**
-     * Updates the player list based on player status message received from server
-     * */
+     * Updates the reactive player list based on a player status message from the server.
+     * Handles these statuses:
+     *  - "joined"  : adds a new player entry
+     *  - "left"    : removes the player from the list
+     *  - "ready"   : marks the player as ready (or adds them if not yet in the list)
+     *  - "drawing" : highlights the current drawer and clears other players' drawing state
+     *  - "scored"  : updates the player's score
+     * @param {Array}  players  - The reactive player list array (mutated in place)
+     * @param {Object} payload  - The player status message from the server
+     * @param {string} clientId - This client's ID (used to filter targeted messages)
+     */
     function handlePlayerStatus(players, payload, clientId) {
-      // why would this happen?
       if (!payload || !payload.clientId) {
         console.error("Invalid player status payload", payload);
         return;
       }
-      if (payload.status === "scored") {
-        const scoredPlayer = players.find((player) => player.clientId === payload.clientId);
-        if (scoredPlayer) {
-          scoredPlayer.score = payload.score;
-        }
-        return;
-      }
-      if (payload.status === "drawing") {
-        players.forEach((player) => {
-          player.isDrawing = player.clientId === payload.clientId;
-        });
-        return;
-      }
-      if (payload.status === "ready") {
-        const existing = players.find((player) => player.clientId === payload.clientId);
-        if (existing) {
-          existing.isReady = true;
-          return;
-        }
-      }
-      if (payload.status === "left") {
-        const leftPlayerIndex = players.findIndex((player) => player.clientId === payload.clientId);
-        if (leftPlayerIndex !== -1) {
-          players.splice(leftPlayerIndex, 1);
-        }
-        return;
-      }
-      if (!payload.name) {
-        return;
-      }
-      if (payload.targetClientId && payload.targetClientId !== clientId) {
-        return;
-      }
-      const existing = players.find((player) => player.clientId === payload.clientId);
-      if (payload.status === "joined" && !existing) {
-        players.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false, score: 0 });
-        return;
-      }
-      if (payload.status === "ready") {
-        if (existing) {
-          existing.isReady = true;
-        } else {
-          players.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false, score: 0 });
-        }
+      const existing = players.find((p) => p.clientId === payload.clientId);
+      switch (payload.status) {
+        case "scored":
+          if (existing) existing.score = payload.score;
+          break;
+        case "drawing":
+          players.forEach((p) => { p.isDrawing = p.clientId === payload.clientId; });
+          break;
+        case "left":
+          if (existing) players.splice(players.indexOf(existing), 1);
+          break;
+        case "joined":
+          if (!existing && payload.name) {
+            players.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false, score: 0 });
+          }
+          break;
+        case "ready":
+          if (existing) {
+            existing.isReady = true;
+          } else if (payload.name) {
+            players.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false, score: 0 });
+          }
+          break;
+        default:
+          console.error("Unknown player status", payload.status);
       }
     }
-    
+
+    /** Returns true if the local player has already clicked "Ready". */
     function isSelfReady(playerList, clientId) {
       const selfPlayer = playerList.find((player) => player.clientId === clientId);
       return !!(selfPlayer && selfPlayer.isReady);
     }
+    /** Returns true if the given player object belongs to this client. */
     function isSelf(player, clientId) {
       return player && player.clientId === clientId;
     }
+    /** Counts how many players in the list have readied up. */
     function readyCount(playerList) {
       return playerList.reduce((count, player) => count + (player.isReady ? 1 : 0), 0);
     }
+    /** Clears the canvas and fills it with the default background color. */
     function clearCanvas(canvas_ctx, width, height) {
       if (!canvas_ctx) return;
       canvas_ctx.clearRect(0, 0, width, height);
