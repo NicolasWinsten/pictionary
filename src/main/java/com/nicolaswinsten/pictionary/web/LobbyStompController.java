@@ -452,8 +452,6 @@ public class LobbyStompController {
         public String getValue() { return value; }
     }
 
-    public record PlayerStatusMessageInfo(String clientId, String name, String targetClientId, PlayerStatus status, int score) {}
-
     /**
      * Broadcast to {@code /topic/lobby/{code}/players} whenever a player's status changes.
      * @param clientId       the player this message is about
