@@ -205,8 +205,6 @@ public class LobbyStompController {
      * Marks a player as ready and, once every player in the lobby is ready,
      * assigns a drawer and kicks off the drawing round.
      *
-     * <p>The drawer is chosen by {@link Lobby#findFirstSessionId()} — currently the first
-     * session found in the players map (effectively insertion order).
      * A drawer is only assigned when <em>all</em> players are ready <em>and</em> no
      * drawer has been set yet for this lobby.
      */
@@ -402,14 +400,6 @@ public class LobbyStompController {
         /** Picks a random noun from {@link #NOUNS} and stores it as the current word. */
         void chooseWord() {
             word = NOUNS[ThreadLocalRandom.current().nextInt(NOUNS.length)];
-        }
-
-        /** Returns the session ID of the first player found (insertion order). */
-        String findFirstSessionId() {
-            Map.Entry<String, Player> first = players.entrySet().iterator().hasNext()
-                ? players.entrySet().iterator().next()
-                : null;
-            return first == null ? null : first.getKey();
         }
 
         /** Returns the session ID of the player after {@code currentClientId}, wrapping around. */
