@@ -229,27 +229,10 @@ public class LobbyStompController {
             "/topic/lobby/" + code + "/players",
             new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.READY, player.score())
         );
-        if (lobby.drawerClientId != null) {
-            return;
+        // If every player is ready and no drawer has been assigned yet, pick the first player as drawer
+        if (lobby.isReady() && lobby.drawerClientId == null) {
+            startNextRound(lobby, code);
         }
-        if (!lobby.isReady()) {
-            return;
-        }
-        String drawerSessionId = lobby.findFirstSessionId();
-        if (drawerSessionId == null) {
-            return;
-        }
-        Player drawer = lobby.players.get(drawerSessionId);
-        if (drawer == null) {
-            return;
-        }
-        lobby.drawerClientId = drawer.clientId();
-        lobby.chooseWord();
-        messagingTemplate.convertAndSend(
-            "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, PlayerStatus.DRAWING, drawer.score())
-        );
-        announceDrawer(lobby, code, drawer);
     }
 
     /**
