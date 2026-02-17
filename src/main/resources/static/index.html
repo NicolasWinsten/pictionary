@@ -146,6 +146,7 @@
         border-radius: 12px;
         background: #f8fbff;
         padding: 8px;
+        width: fit-content;
       }
       .canvas-disabled {
         opacity: 0.6;
@@ -598,7 +599,7 @@
     function sendStomp(client, destination, body) {
       const payload = JSON.stringify(body);
       if (!client || !client.connected) {
-        wsStore.pendingMessages.push({ destination, body: payload });
+        Alpine.store('ws').pendingMessages.push({ destination, body: payload });
         return;
       }
       client.publish({
@@ -622,6 +623,8 @@
       }
     }
     function getClientId() {
+      const stored = getStoredClientId();
+      if (stored) return stored;
       const id = createClientId();
       saveClientId(id);
       return id;
