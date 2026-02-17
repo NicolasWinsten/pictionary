@@ -49,6 +49,8 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
      */
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
-        registry.addEndpoint("/ws").withSockJS();
+        registry.addEndpoint("/ws")
+            .setAllowedOriginPatterns("https://*.fly.dev", "http://localhost:*", "http://127.0.0.1:*")
+            .withSockJS();
     }
 }
