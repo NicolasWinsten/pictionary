@@ -229,7 +229,7 @@
   </head>
   <body>
     <!-- Lobby card asking for lobby code-->
-    <div class="overlay" x-data x-show="!$store.ws.isConnected" x-transition>
+    <div class="overlay" x-data="{ lobbyCodeInput: '' }" x-show="!$store.ws.isConnected" x-transition>
       <div class="lobby-card">
         <h2>Join a lobby</h2>
         <p class="note">Enter your lobby code to start.</p>
@@ -238,11 +238,11 @@
           class="lobby-input"
           type="text"
           placeholder="Lobby code"
-          x-model.trim="$store.ws.lobbyCode"
-          @keydown.enter.prevent="connectLobby($store.ws)"
+          x-model.trim="lobbyCodeInput"
+          @keydown.enter.prevent="connectLobby($store.ws, lobbyCodeInput)"
         />
         <div class="lobby-actions">
-          <button @click="connectLobby($store.ws)">Connect</button>
+          <button @click="connectLobby($store.ws, lobbyCodeInput)">Connect</button>
           <span class="pill" x-text="$store.ws.wsStatus"></span>
         </div>
       </div>
@@ -263,7 +263,7 @@
             <div class="canvas-box">
               <canvas
                 x-ref="draw"
-                :class="{ 'canvas-disabled': !isDrawer($store.ws) }"
+                :class="{ 'canvas-disabled': !$store.ws.isDrawer }"
                 @pointerdown.prevent="pointerDown($event)"
                 @pointermove.prevent="pointerMove($event)"
                 @pointerup="pointerUp()"
@@ -292,7 +292,7 @@
                 x-data="{ playerList: [] }"
                 @player-status.window="handlePlayerStatus(playerList, $event.detail, $store.ws.clientId)"
               >
-                <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || $store.ws.lobbyCode || '----'}`"></div>
+                <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
                     <li class="player-item">
@@ -341,16 +341,13 @@
     function createWsStore() {
       return {
         isConnected: false,
-        lobbyCode: "",
         stompClient: null,
         pendingMessages: [],
-        clientId: null,
+        clientId: getClientId(),
         wsStatus: "disconnected",
         subscribedLobby: null,
-        lobbySubscription: null,
-        playerSubscription: null,
-        chatSubscription: null,
-        drawerClientId: null
+        subscriptions: [],
+        isDrawer: null
       };
     }
 
@@ -363,11 +360,10 @@
         isDrawing: false,
         remotePaths: {},
         init() {
-          ensureClientId(this.$store.ws);
           initCanvas(this, this.$refs);
         },
         pointerDown(event) {
-          if (!this.ctx || !isDrawer(this.$store.ws)) return;
+          if (!this.ctx || !this.$store.ws.isDrawer) return;
           this.isDrawing = true;
           const { x, y } = getPos(this.$refs, event);
           this.lastPos = { x, y };
@@ -376,7 +372,7 @@
           sendDrawEvent(this.$store.ws,"start", x, y);
         },
         pointerMove(event) {
-          if (!this.isDrawing || !this.ctx || !isDrawer(this.$store.ws)) return;
+          if (!this.isDrawing || !this.ctx || !this.$store.ws.isDrawer) return;
           const { x, y } = getPos(this.$refs, event);
           this.ctx.lineTo(x, y);
           this.ctx.stroke();
@@ -384,7 +380,7 @@
           sendDrawEvent(this.$store.ws,"move", x, y);
         },
         pointerUp() {
-          if (this.isDrawing && this.lastPos && isDrawer(this.$store.ws)) {
+          if (this.isDrawing && this.lastPos && this.$store.ws.isDrawer) {
             sendDrawEvent(this.$store.ws,"end", this.lastPos.x, this.lastPos.y);
           }
           this.isDrawing = false;
@@ -466,13 +462,12 @@
       }
       sendStomp(wsStore,"/app/ready", {});
     }
-    function connectLobby(wsStore) {
-      const code = wsStore.lobbyCode.trim();
+    function connectLobby(wsStore, lobbyCode) {
+      const code = lobbyCode.trim();
       if (!code) {
         wsStore.wsStatus = "code required";
         return;
       }
-      ensureClientId(wsStore);
       if (wsStore.stompClient && wsStore.stompClient.connected) {
         sendStomp(wsStore, "/app/lobby", { code, clientId: wsStore.clientId });
         return;
@@ -508,24 +503,17 @@
       if (!code) {
         return;
       }
-      if (wsStore.subscribedLobby === code && wsStore.lobbySubscription) {
+      if (wsStore.subscribedLobby === code && wsStore.subscriptions.length) {
         return;
       }
-      if (wsStore.lobbySubscription) {
-        wsStore.lobbySubscription.unsubscribe();
-      }
-      if (wsStore.playerSubscription) {
-        wsStore.playerSubscription.unsubscribe();
-      }
-      if (wsStore.chatSubscription) {
-        wsStore.chatSubscription.unsubscribe();
-      }
+      wsStore.subscriptions.forEach((sub) => sub.unsubscribe());
+      wsStore.subscriptions = [];
       wsStore.subscribedLobby = code;
-      wsStore.drawerClientId = null;
+      wsStore.isDrawer = false;
       if (!wsStore.stompClient || !wsStore.stompClient.connected) {
         return;
       }
-      wsStore.lobbySubscription = wsStore.stompClient.subscribe(
+      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
         `/topic/lobby/${code}/draw`,
         (message) => {
           let payload = null;
@@ -539,8 +527,8 @@
           }
           dispatchDrawEvent(payload);
         }
-      );
-      wsStore.playerSubscription = wsStore.stompClient.subscribe(
+      ));
+      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
         `/topic/lobby/${code}/players`,
         (message) => {
           let payload = null;
@@ -556,7 +544,7 @@
             return;
           }
           if (payload.status === "drawing") {
-            wsStore.drawerClientId = payload.clientId;
+            wsStore.isDrawer = payload.clientId === wsStore.clientId;
             if (payload.targetClientId && payload.targetClientId === wsStore.clientId) {
               const drawerName = payload.name || "A player";
               dispatchChatMessage({
@@ -568,8 +556,8 @@
           }
           dispatchPlayerStatus(payload);
         }
-      );
-      wsStore.chatSubscription = wsStore.stompClient.subscribe(
+      ));
+      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
         `/topic/lobby/${code}/chat`,
         (message) => {
           let payload = null;
@@ -586,7 +574,7 @@
           }
           dispatchChatMessage(payload);
         }
-      );
+      ));
     }
     function sendStomp(wsStore, destination, body) {
       const payload = JSON.stringify(body);
@@ -613,9 +601,10 @@
         });
       }
     }
-    function ensureClientId(wsStore) {
-      wsStore.clientId = createClientId();
-      saveClientId(wsStore.clientId);
+    function getClientId() {
+      const id = createClientId();
+      saveClientId(id);
+      return id;
     }
     function sendDrawEvent(wsStore, type, x, y) {
       sendStomp(wsStore,"/app/draw", { type, x, y, sourceId: wsStore.clientId });
@@ -691,9 +680,7 @@
         }
       }
     }
-    function isDrawer(wsStore) {
-      return wsStore.drawerClientId === wsStore.clientId;
-    }
+    
     function isSelfReady(playerList, clientId) {
       const selfPlayer = playerList.find((player) => player.clientId === clientId);
       return !!(selfPlayer && selfPlayer.isReady);
