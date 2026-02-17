@@ -423,12 +423,12 @@
         isDrawing: false,
         remotePaths: {},
         init() {
-          initCanvas(this, this.$refs);
+          initCanvas(this, this.$refs.draw);
         },
         pointerDown(event) {
           if (!this.ctx || !this.$store.ws.isDrawer) return;
           this.isDrawing = true;
-          const { x, y } = getPos(this.$refs, event);
+          const { x, y } = getPos(this.$refs.draw, event);
           this.lastPos = { x, y };
           this.ctx.beginPath();
           this.ctx.moveTo(x, y);
@@ -436,7 +436,7 @@
         },
         pointerMove(event) {
           if (!this.isDrawing || !this.ctx || !this.$store.ws.isDrawer) return;
-          const { x, y } = getPos(this.$refs, event);
+          const { x, y } = getPos(this.$refs.draw, event);
           this.ctx.lineTo(x, y);
           this.ctx.stroke();
           this.lastPos = { x, y };
@@ -453,6 +453,7 @@
           clearCanvas(this.ctx, this.width, this.height);
           sendDrawEvent(this.$store.ws, "clear", 0, 0);
         },
+        // apply a draw event from the server to the canvas
         applyRemoteDraw(event) {
           if (!this.ctx || !event) {
             return;
@@ -487,10 +488,10 @@
      * Initializes the <canvas> element: sets CSS/pixel dimensions accounting for
      * device pixel ratio, configures stroke style, and fills with background color.
      * @param {Object} canvasState - The canvasPanel Alpine component state
-     * @param {Object} refs        - Alpine $refs containing the "draw" canvas element
+     * @param {HTMLCanvasElement} canvasEl - The <canvas> element
      */
-    function initCanvas(canvasState, refs) {
-      const canvas = refs.draw;
+    function initCanvas(canvasState, canvasEl) {
+      const canvas = canvasEl;
       const dpr = window.devicePixelRatio || 1;
       canvas.style.width = `${canvasState.width}px`;
       canvas.style.height = `${canvasState.height}px`;
@@ -504,8 +505,8 @@
       clearCanvas(canvasState.ctx, canvasState.width, canvasState.height);
     }
     /** Converts a pointer event's page coordinates to canvas-local coordinates. */
-    function getPos(refs, event) {
-      const rect = refs.draw.getBoundingClientRect();
+    function getPos(canvas, event) {
+      const rect = canvas.getBoundingClientRect();
       return {
         x: event.clientX - rect.left,
         y: event.clientY - rect.top
