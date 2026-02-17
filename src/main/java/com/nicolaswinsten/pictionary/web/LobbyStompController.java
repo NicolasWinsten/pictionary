@@ -100,13 +100,13 @@ public class LobbyStompController {
         String name = generateName(clientId);
 
         Lobby lobby = lobbies.computeIfAbsent(code, k -> new Lobby());
-        lobby.addPlayer(sessionId, new Player(clientId, name, false));
+        lobby.addPlayer(sessionId, new Player(clientId, name, false, 0));
         sessionLobby.put(sessionId, code);
 
         sendExistingPlayersToNewcomer(lobby, code, sessionId, clientId);
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(clientId, name, null, PlayerStatus.JOINED)
+            new PlayerStatusMessage(clientId, name, null, PlayerStatus.JOINED, 0)
         );
         LOGGER.info("Lobby joined: code={}, clientId={}, name={}", code, clientId, name);
     }
@@ -162,10 +162,25 @@ public class LobbyStompController {
             return;
         }
         String text = message.text().trim();
-        messagingTemplate.convertAndSend(
-            "/topic/lobby/" + code + "/chat",
-            new GuessMessage(player.clientId(), player.name(), text, null)
-        );
+        if (lobby.word != null && text.equalsIgnoreCase(lobby.word)) {
+            // Correct guess — increment score
+            Player scored = new Player(player.clientId(), player.name(), player.ready(), player.score() + 1);
+            lobby.players.put(sessionId, scored);
+            messagingTemplate.convertAndSend(
+                "/topic/lobby/" + code + "/players",
+                new PlayerStatusMessage(scored.clientId(), scored.name(), null, PlayerStatus.SCORED, scored.score())
+            );
+            messagingTemplate.convertAndSend(
+                "/topic/lobby/" + code + "/chat",
+                new GuessMessage("system", "System", scored.name() + " correctly guessed " + lobby.word, null)
+            );
+            startNextRound(lobby, code);
+        } else {
+            messagingTemplate.convertAndSend(
+                "/topic/lobby/" + code + "/chat",
+                new GuessMessage(player.clientId(), player.name(), text, null)
+            );
+        }
     }
 
     /**
@@ -194,7 +209,7 @@ public class LobbyStompController {
         }
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.READY)
+            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.READY, player.score())
         );
         if (lobby.drawerClientId != null) {
             return;
@@ -214,17 +229,9 @@ public class LobbyStompController {
         lobby.chooseWord();
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, PlayerStatus.DRAWING)
+            new PlayerStatusMessage(drawer.clientId(), drawer.name(), null, PlayerStatus.DRAWING, drawer.score())
         );
-        String label = drawer.name() == null || drawer.name().isBlank() ? "A player" : drawer.name();
-        messagingTemplate.convertAndSend(
-            "/topic/lobby/" + code + "/chat",
-            new GuessMessage("system", "System", label + " is drawing.", null)
-        );
-        messagingTemplate.convertAndSend(
-            "/topic/lobby/" + code + "/chat",
-            new GuessMessage("system", "System", "Your word is: " + lobby.word, drawer.clientId())
-        );
+        announceDrawer(lobby, code, drawer);
     }
 
     /**
@@ -256,7 +263,7 @@ public class LobbyStompController {
         }
         messagingTemplate.convertAndSend(
             "/topic/lobby/" + code + "/players",
-            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.LEFT)
+            new PlayerStatusMessage(player.clientId(), player.name(), null, PlayerStatus.LEFT, player.score())
         );
     }
 
@@ -287,34 +294,73 @@ public class LobbyStompController {
             }
             messagingTemplate.convertAndSend(
                 "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.JOINED)
+                new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.JOINED, existing.score())
             );
             if (existing.ready()) {
                 messagingTemplate.convertAndSend(
                     "/topic/lobby/" + code + "/players",
-                    new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.READY)
+                    new PlayerStatusMessage(existing.clientId(), existing.name(), targetClientId, PlayerStatus.READY, existing.score())
                 );
             }
         }
         String drawerClientId = lobby.drawerClientId;
         if (drawerClientId != null && !drawerClientId.isBlank()) {
-            // Find the drawer's name from the players map
-            String drawerName = lobby.players.values().stream()
+            // Find the drawer from the players map
+            Player drawerPlayer = lobby.players.values().stream()
                 .filter(p -> drawerClientId.equals(p.clientId()))
-                .map(Player::name)
                 .findFirst()
                 .orElse(null);
-            messagingTemplate.convertAndSend(
-                "/topic/lobby/" + code + "/players",
-                new PlayerStatusMessage(drawerClientId, drawerName, targetClientId, PlayerStatus.DRAWING)
-            );
+            if (drawerPlayer != null) {
+                messagingTemplate.convertAndSend(
+                    "/topic/lobby/" + code + "/players",
+                    new PlayerStatusMessage(drawerClientId, drawerPlayer.name(), targetClientId, PlayerStatus.DRAWING, drawerPlayer.score())
+                );
+            }
         }
+    }
+
+    /** Picks the next drawer, chooses a new word, and broadcasts the new round. */
+    private void startNextRound(Lobby lobby, String code) {
+        String nextSessionId = lobby.findNextSessionId(lobby.drawerClientId);
+        if (nextSessionId == null) {
+            return;
+        }
+        Player nextDrawer = lobby.players.get(nextSessionId);
+        if (nextDrawer == null) {
+            return;
+        }
+        lobby.drawerClientId = nextDrawer.clientId();
+        lobby.chooseWord();
+        
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/players",
+            new PlayerStatusMessage(nextDrawer.clientId(), nextDrawer.name(), null, PlayerStatus.DRAWING, nextDrawer.score())
+        );
+        messagingTemplate.convertAndSend("/topic/lobby/" + code + "/draw", new DrawEvent("clear", 0, 0, null));
+        announceDrawer(lobby, code, nextDrawer);
+    }
+
+    /** Sends chat announcements and the word message for the current drawer. */
+    private void announceDrawer(Lobby lobby, String code, Player drawer) {
+        String label = drawer.name() == null || drawer.name().isBlank() ? "A player" : drawer.name();
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/chat",
+            new GuessMessage("system", "System", label + " is drawing.", null)
+        );
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/chat",
+            new GuessMessage("system", "System", "Your word is: " + lobby.word, drawer.clientId())
+        );
+        messagingTemplate.convertAndSend(
+            "/topic/lobby/" + code + "/word",
+            new WordMessage(lobby.word, drawer.clientId())
+        );
     }
 
     // ── Inner data types ─────────────────────────────────────────────────────
 
     /** Immutable snapshot of a player's state. Replaced atomically when {@code ready} changes. */
-    record Player(String clientId, String name, boolean ready) {}
+    record Player(String clientId, String name, boolean ready, int score) {}
 
     /** Mutable, thread-safe lobby containing players and the current drawer. */
     static final class Lobby {
@@ -332,7 +378,7 @@ public class LobbyStompController {
 
         /** Replaces the player record with {@code ready = true}. */
         void markReady(String sessionId) {
-            players.computeIfPresent(sessionId, (k, p) -> new Player(p.clientId(), p.name(), true));
+            players.computeIfPresent(sessionId, (k, p) -> new Player(p.clientId(), p.name(), true, p.score()));
         }
 
         /** Returns {@code true} when at least one player exists and every player is ready. */
@@ -364,6 +410,25 @@ public class LobbyStompController {
                 : null;
             return first == null ? null : first.getKey();
         }
+
+        /** Returns the session ID of the player after {@code currentClientId}, wrapping around. */
+        String findNextSessionId(String currentClientId) {
+            String firstSessionId = null;
+            boolean found = false;
+            for (Map.Entry<String, Player> entry : players.entrySet()) {
+                if (firstSessionId == null) {
+                    firstSessionId = entry.getKey();
+                }
+                if (found) {
+                    return entry.getKey();
+                }
+                if (entry.getValue().clientId().equals(currentClientId)) {
+                    found = true;
+                }
+            }
+            // Wrap around to first player
+            return firstSessionId;
+        }
     }
 
     // ── DTOs (deserialized from / serialized to JSON by Spring) ──────────────
@@ -385,7 +450,8 @@ public class LobbyStompController {
         JOINED("joined"),
         READY("ready"),
         DRAWING("drawing"),
-        LEFT("left");
+        LEFT("left"),
+        SCORED("scored");
 
         private final String value;
 
@@ -395,6 +461,8 @@ public class LobbyStompController {
         public String getValue() { return value; }
     }
 
+    public record PlayerStatusMessageInfo(String clientId, String name, String targetClientId, PlayerStatus status, int score) {}
+
     /**
      * Broadcast to {@code /topic/lobby/{code}/players} whenever a player's status changes.
      * @param clientId       the player this message is about
@@ -403,7 +471,7 @@ public class LobbyStompController {
      *                       (used during newcomer catch-up)
      * @param status         one of {@link PlayerStatus}
      */
-    public record PlayerStatusMessage(String clientId, String name, String targetClientId, PlayerStatus status) {}
+    public record PlayerStatusMessage(String clientId, String name, String targetClientId, PlayerStatus status, int score) {}
 
     /** Payload received when a player submits a guess ({@code /app/guess}). */
     public record GuessInput(String text) {}
@@ -414,4 +482,11 @@ public class LobbyStompController {
      * @param targetClientId if non-null, only this client should display the message
      */
     public record GuessMessage(String clientId, String name, String text, String targetClientId) {}
+
+    /**
+     * Sent to {@code /topic/lobby/{code}/word} to tell the drawer which word to draw.
+     * @param word           the word to draw
+     * @param targetClientId the drawer's client ID (only this client should display it)
+     */
+    public record WordMessage(String word, String targetClientId) {}
 }

@@ -260,6 +260,7 @@
             x-init="init()"
             @draw-event.window="applyRemoteDraw($event.detail)"
           >
+            <div class="pill" x-show="$store.ws.currentWord" x-text="`Draw: ${$store.ws.currentWord}`"></div>
             <div class="canvas-box">
               <canvas
                 x-ref="draw"
@@ -271,13 +272,14 @@
               ></canvas>
             </div>
             <div class="canvas-tools">
-              <button @click="clearCanvas(ctx, width, height)">Clear</button>
+              <button @click="sendClear()">Clear</button>
               <div class="guess-bar" x-data="{ guessText: '' }">
                 <input
                   class="guess-input"
                   type="text"
-                  placeholder="Type a guess and press Enter"
+                  x-bind:placeholder="$store.ws.isDrawer ? '' : 'Type a guess and press Enter'"
                   x-model.trim="guessText"
+                  x-bind:disabled="$store.ws.isDrawer"
                   @keydown.enter.prevent="submitGuess(guessText, $store.ws); guessText = ''"
                 />
               </div>
@@ -295,13 +297,16 @@
                 <div class="pill" x-text="`Lobby: ${$store.ws.subscribedLobby || '----'}`"></div>
                 <ul class="player-list">
                   <template x-for="(player, index) in playerList" :key="`${player.clientId}-${index}`">
-                    <li class="player-item">
+                    <li class="player-item" :class="{ drawing: player.isDrawing  }">
                       <span
                         class="player-name"
                         :class="{ ready: player.isReady, drawing: player.isDrawing }"
                         x-text="player.name"
                       ></span>
-                      <span class="note" x-show="isSelf(player, $store.ws.clientId)">(you)</span>
+                      <span>
+                        <span class="note" x-show="player.score > 0" x-text="player.score" style="font-weight:700;color:var(--accent)"></span>
+                        <span class="note" x-show="isSelf(player, $store.ws.clientId)">(you)</span>
+                      </span>
                     </li>
                   </template>
                 </ul>
@@ -347,7 +352,8 @@
         wsStatus: "disconnected",
         subscribedLobby: null,
         subscriptions: [],
-        isDrawer: null
+        isDrawer: null,
+        currentWord: null
       };
     }
 
@@ -385,8 +391,18 @@
           }
           this.isDrawing = false;
         },
+        sendClear() {
+          if (!this.$store.ws.isDrawer) return;
+          clearCanvas(this.ctx, this.width, this.height);
+          sendDrawEvent(this.$store.ws, "clear", 0, 0);
+        },
         applyRemoteDraw(event) {
           if (!this.ctx || !event || !event.sourceId) {
+            return;
+          }
+          if (event.type === "clear") {
+            clearCanvas(this.ctx, this.width, this.height);
+            this.remotePaths = {};
             return;
           }
           const key = event.sourceId;
@@ -454,13 +470,13 @@
       if (!text || !wsStore) {
         return;
       }
-      sendStomp(wsStore,"/app/guess", { text });
+      sendStomp(wsStore.stompClient,"/app/guess", { text });
     }
     function sendReady(wsStore) {
       if (!wsStore) {
         return;
       }
-      sendStomp(wsStore,"/app/ready", {});
+      sendStomp(wsStore.stompClient,"/app/ready", {});
     }
     function connectLobby(wsStore, lobbyCode) {
       const code = lobbyCode.trim();
@@ -469,7 +485,7 @@
         return;
       }
       if (wsStore.stompClient && wsStore.stompClient.connected) {
-        sendStomp(wsStore, "/app/lobby", { code, clientId: wsStore.clientId });
+        sendStomp(wsStore.stompClient, "/app/lobby", { code, clientId: wsStore.clientId });
         return;
       }
       const stomp = StompJs;
@@ -486,7 +502,7 @@
           wsStore.wsStatus = "connected";
           subscribeLobby(wsStore, code);
           flushPending(wsStore);
-          sendStomp(wsStore, "/app/lobby", { code, clientId: wsStore.clientId });
+          sendStomp(wsStore.stompClient, "/app/lobby", { code, clientId: wsStore.clientId });
         },
         onStompError: () => {
           wsStore.isConnected = false;
@@ -510,6 +526,7 @@
       wsStore.subscriptions = [];
       wsStore.subscribedLobby = code;
       wsStore.isDrawer = false;
+      wsStore.currentWord = null;
       if (!wsStore.stompClient || !wsStore.stompClient.connected) {
         return;
       }
@@ -545,6 +562,9 @@
           }
           if (payload.status === "drawing") {
             wsStore.isDrawer = payload.clientId === wsStore.clientId;
+            if (!wsStore.isDrawer) {
+              wsStore.currentWord = null;
+            }
             if (payload.targetClientId && payload.targetClientId === wsStore.clientId) {
               const drawerName = payload.name || "A player";
               dispatchChatMessage({
@@ -575,19 +595,39 @@
           dispatchChatMessage(payload);
         }
       ));
+      wsStore.subscriptions.push(wsStore.stompClient.subscribe(
+        `/topic/lobby/${code}/word`,
+        (message) => {
+          let payload = null;
+          try {
+            payload = JSON.parse(message.body);
+          } catch (error) {
+            return;
+          }
+          if (!payload || !payload.word) {
+            return;
+          }
+          if (payload.targetClientId && payload.targetClientId !== wsStore.clientId) {
+            return;
+          }
+          wsStore.currentWord = payload.word;
+        }
+      ));
     }
-    function sendStomp(wsStore, destination, body) {
+
+    function sendStomp(client, destination, body) {
       const payload = JSON.stringify(body);
-      if (!wsStore.stompClient || !wsStore.stompClient.connected) {
+      if (!client || !client.connected) {
         wsStore.pendingMessages.push({ destination, body: payload });
         return;
       }
-      wsStore.stompClient.publish({
+      client.publish({
         destination,
         body: payload,
         headers: { "content-type": "application/json" }
       });
     }
+    
     function flushPending(wsStore) {
       if (!wsStore.stompClient || !wsStore.stompClient.connected) {
         return;
@@ -607,7 +647,7 @@
       return id;
     }
     function sendDrawEvent(wsStore, type, x, y) {
-      sendStomp(wsStore,"/app/draw", { type, x, y, sourceId: wsStore.clientId });
+      sendStomp(wsStore.stompClient,"/app/draw", { type, x, y, sourceId: wsStore.clientId });
     }
     function dispatchPlayerStatus(payload) {
       window.dispatchEvent(new CustomEvent("player-status", { detail: payload }));
@@ -641,6 +681,13 @@
         console.error("Invalid player status payload", payload);
         return;
       }
+      if (payload.status === "scored") {
+        const scoredPlayer = players.find((player) => player.clientId === payload.clientId);
+        if (scoredPlayer) {
+          scoredPlayer.score = payload.score;
+        }
+        return;
+      }
       if (payload.status === "drawing") {
         players.forEach((player) => {
           player.isDrawing = player.clientId === payload.clientId;
@@ -669,14 +716,14 @@
       }
       const existing = players.find((player) => player.clientId === payload.clientId);
       if (payload.status === "joined" && !existing) {
-        players.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false });
+        players.push({ name: payload.name, clientId: payload.clientId, isReady: false, isDrawing: false, score: 0 });
         return;
       }
       if (payload.status === "ready") {
         if (existing) {
           existing.isReady = true;
         } else {
-          players.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false });
+          players.push({ name: payload.name, clientId: payload.clientId, isReady: true, isDrawing: false, score: 0 });
         }
       }
     }
